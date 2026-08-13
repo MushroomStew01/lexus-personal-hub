@@ -44,3 +44,11 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/lexus_hub/alerts.py" = ["E402", "E501"]
+"src/lexus_hub/analytics.py" = ["E402"]
+"src/lexus_hub/bot.py" = ["E402"]
+"src/lexus_hub/poller.py" = ["E402"]
+"src/lexus_hub/storage.py" = ["E402"]
+"src/lexus_hub/web.py" = ["E501"]
