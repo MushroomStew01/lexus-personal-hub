@@ -3,7 +3,7 @@ from lexus_hub.config import Settings
 
 
 def test_package_version():
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.2.0"
 
 
 def test_location_storage_is_opt_in():
