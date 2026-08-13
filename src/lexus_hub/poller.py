@@ -6,6 +6,7 @@ import asyncio
 import logging
 from typing import Any
 
+from .alerts import deliver_alerts
 from .config import Settings, get_settings
 from .db import init_db, session_scope
 from .providers import get_provider
@@ -21,6 +22,7 @@ async def poll_once(settings: Settings | None = None) -> dict[str, Any]:
     init_db()
     with session_scope() as session:
         vehicle, snapshot = save_snapshot(session, reading, provider.name, settings)
+        alerts = await deliver_alerts(session, vehicle, snapshot, settings)
         return {
             "provider": provider.name,
             "vehicle": vehicle.display_name,
@@ -29,6 +31,7 @@ async def poll_once(settings: Settings | None = None) -> dict[str, Any]:
             "fuel_percent": snapshot.fuel_percent,
             "range_km": snapshot.range_km,
             "speed_kph": snapshot.speed_kph,
+            "alerts_delivered": alerts,
         }
 
 
