@@ -1,6 +1,6 @@
 # Lexus Personal Hub
 
-A private personal vehicle-data application combining three projects:
+An open-source personal vehicle-data application combining three projects:
 
 1. **Lexus personal dashboard** — odometer, fuel/range, maintenance interval, fuel spend and driving analytics.
 2. **Lexus → Discord** — low-fuel/range/service alerts plus `/car`, `/trips` and `/fuel` slash commands.
@@ -79,7 +79,7 @@ lexus-hub poll-once
 
 The app can consume Home Assistant entities exposing odometer, fuel, range, location, speed and last-update time.
 
-Create a Home Assistant long-lived access token, then change `.env`:
+Create a Home Assistant long-lived access token, then change your local `.env`:
 
 ```dotenv
 PROVIDER=home_assistant
@@ -104,7 +104,7 @@ In Home Assistant: **Developer Tools → States**, search for the vehicle name a
 
 ### Automatic alerts
 
-Set a Discord channel webhook in `.env`:
+Set a Discord channel webhook in your local `.env`:
 
 ```dotenv
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
@@ -184,13 +184,20 @@ To also run the Discord bot:
 docker compose --profile bot up --build
 ```
 
-## Data and privacy
+## Secrets, data and privacy
 
+This repository is designed so the source code can remain public while runtime credentials and personal vehicle data stay private.
+
+- Keep real credentials in a local `.env`, deployment environment variables, or GitHub Actions repository secrets — never in tracked source files.
+- `.env` is ignored by Git; `.env.example` contains placeholders only.
 - SQLite data lives in `.data/` and is ignored by Git.
-- Exact location is stored only when `STORE_LOCATION=true`.
-- Coordinates are hidden from the status API unless `SHOW_EXACT_LOCATION=true`.
-- `.env`, tokens, webhook URLs and the database are ignored by Git.
-- Bind to `127.0.0.1` unless you deliberately place the app behind authentication/TLS.
+- Location collection is **off by default** with `STORE_LOCATION=false`.
+- To opt into location history, explicitly set `STORE_LOCATION=true` in your private runtime configuration.
+- Coordinates remain hidden from the status API unless `SHOW_EXACT_LOCATION=true`.
+- Do not commit VINs, trip databases, exported location history, account credentials, session tokens, or Discord credentials.
+- Bind to `127.0.0.1` unless you deliberately place the app behind authentication and TLS.
+
+If a credential is accidentally committed, revoke/rotate it immediately; deleting the current file is not enough because Git history may still contain it.
 
 ## Tests
 
@@ -200,7 +207,7 @@ ruff check .
 pytest
 ```
 
-GitHub Actions runs linting and tests on Python 3.11 and 3.12.
+GitHub Actions runs linting and tests on Python 3.11 and 3.12 with read-only repository contents permission.
 
 ## Roadmap
 
