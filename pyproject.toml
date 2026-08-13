@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lexus-personal-hub"
-version = "0.1.0"
+version = "0.2.0"
 description = "A read-only Lexus personal dashboard, trip logger, and Discord companion."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -16,7 +16,6 @@ dependencies = [
   "sqlalchemy>=2.0,<3",
   "pydantic-settings>=2.5,<3",
   "httpx>=0.27,<1",
-  "jinja2>=3.1,<4",
   "python-multipart>=0.0.9,<1",
   "discord.py>=2.4,<3",
 ]
