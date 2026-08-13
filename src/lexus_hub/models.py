@@ -21,8 +21,14 @@ class Vehicle(Base):
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
 
-    snapshots: Mapped[list["Snapshot"]] = relationship(back_populates="vehicle", cascade="all, delete-orphan")
-    trips: Mapped[list["Trip"]] = relationship(back_populates="vehicle", cascade="all, delete-orphan")
+    snapshots: Mapped[list[Snapshot]] = relationship(
+        back_populates="vehicle",
+        cascade="all, delete-orphan",
+    )
+    trips: Mapped[list[Trip]] = relationship(
+        back_populates="vehicle",
+        cascade="all, delete-orphan",
+    )
 
 
 class Snapshot(Base):
@@ -30,9 +36,15 @@ class Snapshot(Base):
     __table_args__ = (Index("ix_snapshot_vehicle_observed", "vehicle_id", "observed_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"), index=True)
+    vehicle_id: Mapped[int] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="CASCADE"),
+        index=True,
+    )
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
-    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False),
+        nullable=True,
+    )
     odometer_km: Mapped[float | None] = mapped_column(Float, nullable=True)
     fuel_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     range_km: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -49,7 +61,10 @@ class Trip(Base):
     __table_args__ = (Index("ix_trip_vehicle_started", "vehicle_id", "started_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"), index=True)
+    vehicle_id: Mapped[int] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="CASCADE"),
+        index=True,
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
     last_movement_at: Mapped[datetime] = mapped_column(DateTime(timezone=False))
@@ -69,7 +84,10 @@ class FuelFill(Base):
     __tablename__ = "fuel_fills"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    vehicle_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id", ondelete="CASCADE"), index=True)
+    vehicle_id: Mapped[int] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="CASCADE"),
+        index=True,
+    )
     filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
     liters: Mapped[float] = mapped_column(Float)
     total_cost: Mapped[float] = mapped_column(Float)
