@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
@@ -21,7 +22,7 @@ def _ensure_sqlite_parent(url: str) -> None:
     prefix = "sqlite:///"
     if not url.startswith(prefix):
         return
-    path = url[len(prefix):]
+    path = url[len(prefix) :]
     if path in {":memory:", ""}:
         return
     Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -71,6 +72,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=get_engine())
 
 
+@contextmanager
 def session_scope() -> Generator[Session, None, None]:
     session = get_session_factory()()
     try:
