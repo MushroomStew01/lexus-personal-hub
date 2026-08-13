@@ -32,9 +32,18 @@ def get_engine():
     if _engine is None:
         settings = get_settings()
         _ensure_sqlite_parent(settings.database_url)
-        connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-        _engine = create_engine(settings.database_url, future=True, connect_args=connect_args)
+        connect_args = (
+            {"check_same_thread": False}
+            if settings.database_url.startswith("sqlite")
+            else {}
+        )
+        _engine = create_engine(
+            settings.database_url,
+            future=True,
+            connect_args=connect_args,
+        )
         if settings.database_url.startswith("sqlite"):
+
             @event.listens_for(_engine, "connect")
             def _sqlite_pragmas(dbapi_connection, _connection_record):  # noqa: ANN001
                 cursor = dbapi_connection.cursor()
@@ -47,7 +56,12 @@ def get_engine():
 def get_session_factory():
     global _SessionLocal
     if _SessionLocal is None:
-        _SessionLocal = sessionmaker(bind=get_engine(), autoflush=False, expire_on_commit=False, class_=Session)
+        _SessionLocal = sessionmaker(
+            bind=get_engine(),
+            autoflush=False,
+            expire_on_commit=False,
+            class_=Session,
+        )
     return _SessionLocal
 
 
