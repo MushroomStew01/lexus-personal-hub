@@ -61,7 +61,7 @@ def main() -> None:
 
     if args.command == "serve":
         uvicorn.run(
-            "lexus_hub.web:app",
+            "lexus_hub.app:app",
             host=args.host or settings.app_host,
             port=args.port or settings.app_port,
             reload=args.reload,
