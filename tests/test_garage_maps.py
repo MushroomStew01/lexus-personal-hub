@@ -26,9 +26,9 @@ def test_map_asset_middleware_rewrites_dashboard_cdn_links():
     def page() -> str:
         return (
             '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/'
-            'maplibre-gl@6.3.0/dist/maplibre-gl.css">'
+            'maplibre-gl@5.24.0/dist/maplibre-gl.css">'
             '<script src="https://cdn.jsdelivr.net/npm/'
-            'maplibre-gl@6.3.0/dist/maplibre-gl.js"></script>'
+            'maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>'
         )
 
     app.add_middleware(MapAssetProxyMiddleware)
