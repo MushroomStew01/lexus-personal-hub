@@ -1,3 +1,17 @@
+FROM node:22-alpine AS maplibre-assets
+
+WORKDIR /maplibre
+
+# Pull the published MapLibre npm package during the image build and copy only
+# the browser assets into the final image. This avoids the release dist.zip
+# layout mismatch and keeps Node/npm out of the production image.
+RUN npm init -y >/dev/null 2>&1 \
+    && npm install --omit=dev --no-audit --no-fund maplibre-gl@6.3.0 \
+    && test -s node_modules/maplibre-gl/dist/maplibre-gl.js \
+    && test -s node_modules/maplibre-gl/dist/maplibre-gl.css \
+    && cp node_modules/maplibre-gl/dist/maplibre-gl.js /maplibre/maplibre-gl.js \
+    && cp node_modules/maplibre-gl/dist/maplibre-gl.css /maplibre/maplibre-gl.css
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,34 +24,14 @@ COPY src ./src
 
 RUN python -m pip install --no-cache-dir .
 
-# Vendor MapLibre into the image so maps do not depend on the browser or
-# running container being able to download a multi-megabyte CDN script.
-# GitHub is already required for normal project deployment (`git pull`), and
-# the official MapLibre release publishes a deterministic dist.zip asset.
-RUN python - <<'PY'
-from io import BytesIO
-from pathlib import Path
-from urllib.request import Request, urlopen
-from zipfile import ZipFile
+RUN mkdir -p /app/vendor
+COPY --from=maplibre-assets /maplibre/maplibre-gl.js /app/vendor/maplibre-gl.js
+COPY --from=maplibre-assets /maplibre/maplibre-gl.css /app/vendor/maplibre-gl.css
 
-version = "6.3.0"
-url = f"https://github.com/maplibre/maplibre-gl-js/releases/download/v{version}/dist.zip"
-request = Request(url, headers={"User-Agent": "Lexus-Personal-Hub-Docker-Build/0.3"})
-with urlopen(request, timeout=180) as response:
-    payload = response.read()
-
-vendor = Path("/app/vendor")
-vendor.mkdir(parents=True, exist_ok=True)
-with ZipFile(BytesIO(payload)) as archive:
-    names = archive.namelist()
-    for target in ("maplibre-gl.js", "maplibre-gl.css"):
-        matches = [name for name in names if name.endswith("/" + target) or name == target]
-        if not matches:
-            raise RuntimeError(f"{target} missing from MapLibre dist.zip")
-        vendor.joinpath(target).write_bytes(archive.read(matches[0]))
-
-print("Vendored MapLibre assets:", *(p.name for p in vendor.iterdir()))
-PY
+# Fail the image build immediately if either browser asset is missing/empty.
+RUN test -s /app/vendor/maplibre-gl.js \
+    && test -s /app/vendor/maplibre-gl.css \
+    && ls -lh /app/vendor/maplibre-gl.js /app/vendor/maplibre-gl.css
 
 EXPOSE 8000
 
