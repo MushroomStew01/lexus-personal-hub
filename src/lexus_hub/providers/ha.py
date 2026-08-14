@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -7,6 +8,34 @@ import httpx
 from ..config import Settings
 from ..timeutil import utcnow
 from .base import VehicleReading
+
+_STATUS_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("front_driver_door_lock", ("front driver door lock",), "lock"),
+    ("front_passenger_door_lock", ("front passenger door lock",), "lock"),
+    ("rear_driver_door_lock", ("rear driver door lock",), "lock"),
+    ("rear_passenger_door_lock", ("rear passenger door lock",), "lock"),
+    ("trunk_door_lock", ("trunk door lock",), "lock"),
+    ("front_driver_window", ("front driver window",), "opening"),
+    ("front_passenger_window", ("front passenger window",), "opening"),
+    ("rear_driver_window", ("rear driver window",), "opening"),
+    ("rear_passenger_window", ("rear passenger window",), "opening"),
+    ("front_driver_door", ("front driver door",), "opening"),
+    ("front_passenger_door", ("front passenger door",), "opening"),
+    ("rear_driver_door", ("rear driver door",), "opening"),
+    ("rear_passenger_door", ("rear passenger door",), "opening"),
+    ("moonroof", ("moonroof",), "opening"),
+    ("hood", (" hood ", "_hood_", " hood"), "opening"),
+    ("trunk", (" trunk ", "_trunk_", " trunk"), "opening"),
+    ("front_driver_tire", ("front driver tire",), "number"),
+    ("front_passenger_tire", ("front passenger tire",), "number"),
+    ("rear_driver_tire", ("rear driver tire",), "number"),
+    ("rear_passenger_tire", ("rear passenger tire",), "number"),
+    ("spare_tire", ("spare tire pressure",), "number"),
+    ("next_service", ("next service",), "distance"),
+    ("last_tire_pressure_update", ("last tire pressure update",), "text"),
+    ("last_update", ("last update timestamp", "last update"), "text"),
+    ("remote_start", ("remote start",), "running"),
+)
 
 
 class HAProvider:
@@ -78,7 +107,24 @@ class HAProvider:
     @staticmethod
     def _text(state: dict[str, Any]) -> str:
         attrs = state.get("attributes") or {}
-        return f"{state.get('entity_id', '')} {attrs.get('friendly_name', '')}".lower()
+        return f" {state.get('entity_id', '')} {attrs.get('friendly_name', '')} ".lower()
+
+    @staticmethod
+    def _parse_ha_timestamp(value: object) -> datetime | None:
+        if not value:
+            return None
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    def _vehicle_states(self, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        match = self.settings.vehicle_display_name.strip().lower()
+        if not match or match == "my lexus":
+            return states
+        matched = [item for item in states if match in self._text(item)]
+        return matched or states
 
     def _find(
         self,
@@ -92,15 +138,85 @@ class HAProvider:
                 raise RuntimeError(f"Configured Home Assistant entity was not found: {explicit}")
             return found
 
-        match = self.settings.vehicle_display_name.strip().lower()
-        if match == "my lexus":
-            match = ""
-        candidates = [item for item in states if any(term in self._text(item) for term in terms)]
-        if match:
-            matched = [item for item in candidates if match in self._text(item)]
-            if matched:
-                candidates = matched
+        candidates = [
+            item
+            for item in self._vehicle_states(states)
+            if any(term in self._text(item) for term in terms)
+        ]
         return candidates[0] if candidates else None
+
+    @staticmethod
+    def _friendly_name(state: dict[str, Any]) -> str:
+        attrs = state.get("attributes") or {}
+        return str(attrs.get("friendly_name") or state.get("entity_id") or "")
+
+    @staticmethod
+    def _binary_label(raw: str, kind: str) -> str:
+        value = raw.strip().lower()
+        if kind == "lock":
+            if value in {"off", "locked", "closed", "false", "0"}:
+                return "Locked"
+            if value in {"on", "unlocked", "open", "true", "1"}:
+                return "Unlocked"
+        if kind == "opening":
+            if value in {"off", "closed", "locked", "false", "0"}:
+                return "Closed"
+            if value in {"on", "open", "unlocked", "true", "1"}:
+                return "Open"
+        if kind == "running":
+            if value in {"on", "running", "true", "1"}:
+                return "Running"
+            if value in {"off", "stopped", "false", "0"}:
+                return "Off"
+        return raw
+
+    def _status_record(
+        self,
+        state: dict[str, Any],
+        kind: str,
+    ) -> dict[str, Any]:
+        raw = str(state.get("state") or "")
+        unit = self._unit(state)
+        value: object = raw
+        display = raw
+
+        if kind == "number":
+            number = self._number(state)
+            value = number
+            display = "—" if number is None else f"{number:g} {unit}".strip()
+        elif kind == "distance":
+            distance = self._distance_km(state)
+            value = distance
+            unit = "km"
+            display = "—" if distance is None else f"{distance:.0f} km"
+        elif kind in {"opening", "lock", "running"}:
+            value = self._binary_label(raw, kind)
+            display = str(value)
+
+        return {
+            "value": value,
+            "display": display,
+            "unit": unit,
+            "entity_id": state.get("entity_id"),
+            "friendly_name": self._friendly_name(state),
+            "updated_at": state.get("last_updated"),
+        }
+
+    def _status_map(self, states: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        vehicle_states = self._vehicle_states(states)
+        status: dict[str, dict[str, Any]] = {}
+        used_entities: set[str] = set()
+        for key, terms, kind in _STATUS_RULES:
+            for item in vehicle_states:
+                entity_id = str(item.get("entity_id") or "")
+                if entity_id in used_entities:
+                    continue
+                text = self._text(item)
+                if any(term in text for term in terms):
+                    status[key] = self._status_record(item, kind)
+                    used_entities.add(entity_id)
+                    break
+        return status
 
     async def fetch(self) -> VehicleReading:
         states = await self._states()
@@ -117,23 +233,44 @@ class HAProvider:
             ("distance to empty", "distance_to_empty", "fuel range"),
         )
         speed = self._find(states, self.settings.ha_speed_entity, ("speed",))
+        status = self._status_map(states)
+        source_updated_at = self._parse_ha_timestamp(odometer.get("last_updated"))
         return VehicleReading(
             provider_vehicle_id="ha:primary",
             display_name=self.settings.vehicle_display_name,
             observed_at=utcnow(),
+            source_updated_at=source_updated_at,
             make="Lexus",
             odometer_km=self._distance_km(odometer),
             fuel_percent=self._number(fuel),
             range_km=self._distance_km(range_state),
             speed_kph=self._speed_kph(speed),
+            raw={"status": status},
         )
 
     async def discover(self) -> dict[str, Any]:
         states = await self._states()
+        vehicle_states = self._vehicle_states(states)
         candidates: list[dict[str, Any]] = []
-        for item in states:
+        for item in vehicle_states:
             text = self._text(item)
-            if any(term in text for term in ("odometer", "fuel", "distance to empty", "speed")):
+            if any(
+                term in text
+                for term in (
+                    "odometer",
+                    "fuel",
+                    "distance to empty",
+                    "speed",
+                    "tire",
+                    "door",
+                    "window",
+                    "moonroof",
+                    "hood",
+                    "trunk",
+                    "next service",
+                    "last update",
+                )
+            ):
                 attrs = item.get("attributes") or {}
                 candidates.append(
                     {
@@ -143,4 +280,9 @@ class HAProvider:
                         "unit": attrs.get("unit_of_measurement"),
                     }
                 )
-        return {"provider": self.name, "candidates": candidates}
+        return {
+            "provider": self.name,
+            "vehicle": self.settings.vehicle_display_name,
+            "candidates": candidates,
+            "status": self._status_map(states),
+        }
