@@ -36,3 +36,19 @@ def test_entity_lookup_prefers_vehicle_display_name():
     found = provider._find(states, None, ("odometer",))
     assert found is not None
     assert found["entity_id"] == "sensor.odometer_lexus"
+
+
+def test_home_assistant_binary_opening_semantics():
+    provider = HAProvider(Settings(_env_file=None))
+    assert provider._binary_label("off", "opening") == "Closed"
+    assert provider._binary_label("on", "opening") == "Open"
+    assert provider._binary_label("closed", "opening") == "Closed"
+    assert provider._binary_label("open", "opening") == "Open"
+
+
+def test_home_assistant_binary_lock_semantics():
+    provider = HAProvider(Settings(_env_file=None))
+    assert provider._binary_label("off", "lock") == "Locked"
+    assert provider._binary_label("on", "lock") == "Unlocked"
+    assert provider._binary_label("locked", "lock") == "Locked"
+    assert provider._binary_label("unlocked", "lock") == "Unlocked"
