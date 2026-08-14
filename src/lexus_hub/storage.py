@@ -194,6 +194,15 @@ def add_fuel_fill(
     notes: str | None = None,
     filled_at: datetime | None = None,
 ) -> FuelFill:
+    if odometer_km is None:
+        latest = session.scalar(
+            select(Snapshot)
+            .where(Snapshot.vehicle_id == vehicle.id)
+            .order_by(Snapshot.observed_at.desc())
+            .limit(1)
+        )
+        if latest is not None:
+            odometer_km = latest.odometer_km
     fill = FuelFill(
         vehicle_id=vehicle.id,
         filled_at=as_utc_naive(filled_at) or utcnow(),
