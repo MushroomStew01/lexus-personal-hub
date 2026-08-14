@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .models import FuelFill, Snapshot, Trip
+from .models import FuelFill, Snapshot, Trip, TripPoint
 from .storage import primary_vehicle
 from .timeutil import utcnow
 
@@ -117,6 +117,8 @@ def status_summary(session: Session, settings: Settings) -> dict[str, object]:
         "next_service_odometer_km": next_service,
         "service_remaining_km": service_remaining,
         "vehicle_status": _snapshot_status(latest),
+        "location_storage_enabled": settings.store_location,
+        "trip_maps_enabled": settings.store_location and settings.show_exact_location,
         "last_trip": (
             {
                 "started_at": _local_iso(latest_trip.started_at, settings),
@@ -151,9 +153,79 @@ def recent_trips(
             "ended_at": _local_iso(trip.ended_at, settings),
             "distance_km": round(trip.distance_km, 1),
             "is_open": trip.is_open,
+            "has_route": bool(
+                len(trip.points) >= 2
+                or (
+                    trip.start_latitude is not None
+                    and trip.start_longitude is not None
+                    and trip.end_latitude is not None
+                    and trip.end_longitude is not None
+                )
+            ),
         }
         for trip in trips
     ]
+
+
+def trip_route(
+    session: Session,
+    settings: Settings,
+    trip_id: int,
+) -> dict[str, object] | None:
+    vehicle = primary_vehicle(session, settings)
+    if vehicle is None:
+        return None
+    trip = session.scalar(
+        select(Trip).where(Trip.id == trip_id, Trip.vehicle_id == vehicle.id).limit(1)
+    )
+    if trip is None:
+        return None
+
+    points = session.scalars(
+        select(TripPoint)
+        .where(TripPoint.trip_id == trip.id)
+        .order_by(TripPoint.observed_at.asc())
+    ).all()
+    coordinates = [
+        {
+            "latitude": point.latitude,
+            "longitude": point.longitude,
+            "observed_at": _local_iso(point.observed_at, settings),
+        }
+        for point in points
+    ]
+
+    if len(coordinates) < 2:
+        coordinates = []
+        if trip.start_latitude is not None and trip.start_longitude is not None:
+            coordinates.append(
+                {
+                    "latitude": trip.start_latitude,
+                    "longitude": trip.start_longitude,
+                    "observed_at": _local_iso(trip.started_at, settings),
+                }
+            )
+        if trip.end_latitude is not None and trip.end_longitude is not None:
+            end_point = {
+                "latitude": trip.end_latitude,
+                "longitude": trip.end_longitude,
+                "observed_at": _local_iso(trip.ended_at or trip.last_movement_at, settings),
+            }
+            if not coordinates or (
+                coordinates[-1]["latitude"] != end_point["latitude"]
+                or coordinates[-1]["longitude"] != end_point["longitude"]
+            ):
+                coordinates.append(end_point)
+
+    return {
+        "id": trip.id,
+        "started_at": _local_iso(trip.started_at, settings),
+        "ended_at": _local_iso(trip.ended_at, settings),
+        "distance_km": round(trip.distance_km, 1),
+        "is_open": trip.is_open,
+        "point_count": len(coordinates),
+        "points": coordinates,
+    }
 
 
 def recent_fuel_fills(
