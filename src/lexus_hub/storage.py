@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .models import FuelFill, Snapshot, Trip, Vehicle
+from .models import FuelFill, Snapshot, Trip, TripPoint, Vehicle
 from .providers.base import VehicleReading
 from .timeutil import as_utc_naive, utcnow
 
@@ -18,6 +18,42 @@ def primary_vehicle(session: Session, settings: Settings) -> Vehicle | None:
     provider_id = "ha:primary" if settings.provider == "home_assistant" else "mock:primary"
     return session.scalar(
         select(Vehicle).where(Vehicle.provider_vehicle_id == provider_id).limit(1)
+    )
+
+
+def _snapshot_has_location(snapshot: Snapshot | None) -> bool:
+    return bool(
+        snapshot is not None
+        and snapshot.latitude is not None
+        and snapshot.longitude is not None
+    )
+
+
+def _add_trip_point(session: Session, trip: Trip, snapshot: Snapshot | None) -> None:
+    if not _snapshot_has_location(snapshot) or snapshot is None:
+        return
+    last_point = session.scalar(
+        select(TripPoint)
+        .where(TripPoint.trip_id == trip.id)
+        .order_by(TripPoint.observed_at.desc())
+        .limit(1)
+    )
+    if last_point is not None:
+        same_time = last_point.observed_at == snapshot.observed_at
+        same_place = (
+            abs(last_point.latitude - float(snapshot.latitude)) < 0.000001
+            and abs(last_point.longitude - float(snapshot.longitude)) < 0.000001
+        )
+        if same_time or same_place:
+            return
+    session.add(
+        TripPoint(
+            trip_id=trip.id,
+            observed_at=snapshot.observed_at,
+            latitude=float(snapshot.latitude),
+            longitude=float(snapshot.longitude),
+            odometer_km=snapshot.odometer_km,
+        )
     )
 
 
@@ -50,19 +86,35 @@ def _update_trip(
     if open_trip is None:
         if delta < settings.min_trip_delta_km:
             return
-        session.add(
-            Trip(
-                vehicle_id=current.vehicle_id,
-                started_at=previous.observed_at,
-                ended_at=None,
-                last_movement_at=current.observed_at,
-                start_odometer_km=previous.odometer_km,
-                end_odometer_km=current.odometer_km,
-                distance_km=max(0.0, delta),
-                is_open=True,
-            )
+        trip = Trip(
+            vehicle_id=current.vehicle_id,
+            started_at=previous.observed_at,
+            ended_at=None,
+            last_movement_at=current.observed_at,
+            start_odometer_km=previous.odometer_km,
+            end_odometer_km=current.odometer_km,
+            distance_km=max(0.0, delta),
+            start_latitude=previous.latitude,
+            start_longitude=previous.longitude,
+            end_latitude=current.latitude,
+            end_longitude=current.longitude,
+            is_open=True,
         )
+        session.add(trip)
+        session.flush()
+        _add_trip_point(session, trip, previous)
+        _add_trip_point(session, trip, current)
         return
+
+    if open_trip.start_latitude is None and _snapshot_has_location(previous):
+        open_trip.start_latitude = previous.latitude
+        open_trip.start_longitude = previous.longitude
+        _add_trip_point(session, open_trip, previous)
+
+    if _snapshot_has_location(current):
+        open_trip.end_latitude = current.latitude
+        open_trip.end_longitude = current.longitude
+        _add_trip_point(session, open_trip, current)
 
     if current.odometer_km > open_trip.end_odometer_km + 0.01:
         open_trip.end_odometer_km = current.odometer_km
