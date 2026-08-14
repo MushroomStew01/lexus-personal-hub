@@ -78,6 +78,30 @@ class Trip(Base):
     is_open: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
     vehicle: Mapped[Vehicle] = relationship(back_populates="trips")
+    points: Mapped[list[TripPoint]] = relationship(
+        back_populates="trip",
+        cascade="all, delete-orphan",
+        order_by="TripPoint.observed_at",
+    )
+
+
+class TripPoint(Base):
+    __tablename__ = "trip_points"
+    __table_args__ = (
+        Index("ix_trip_point_trip_observed", "trip_id", "observed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trip_id: Mapped[int] = mapped_column(
+        ForeignKey("trips.id", ondelete="CASCADE"),
+        index=True,
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    odometer_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    trip: Mapped[Trip] = relationship(back_populates="points")
 
 
 class FuelFill(Base):
