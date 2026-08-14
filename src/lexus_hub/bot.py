@@ -30,6 +30,13 @@ _SECURITY_LABELS = {
     "hood": "Hood",
     "trunk": "Trunk",
 }
+_LOCK_LABELS = {
+    "front_driver_door_lock": "Front driver",
+    "front_passenger_door_lock": "Front passenger",
+    "rear_driver_door_lock": "Rear driver",
+    "rear_passenger_door_lock": "Rear passenger",
+    "trunk_door_lock": "Trunk",
+}
 
 
 class LexusBot(discord.Client):
@@ -97,22 +104,15 @@ def _status_embed(settings: Settings) -> discord.Embed:
     return embed
 
 
-def _tires_text(settings: Settings) -> str:
+def _records_text(
+    settings: Settings,
+    labels: dict[str, str],
+) -> str:
     status = _status(settings)
-    lines = [
+    return "\n".join(
         f"**{label}:** {_record_value(status, key)}"
-        for key, label in _TIRE_LABELS.items()
-    ]
-    return "\n".join(lines)
-
-
-def _doors_text(settings: Settings) -> str:
-    status = _status(settings)
-    lines = [
-        f"**{label}:** {_record_value(status, key)}"
-        for key, label in _SECURITY_LABELS.items()
-    ]
-    return "\n".join(lines)
+        for key, label in labels.items()
+    )
 
 
 def run_bot(settings: Settings) -> None:
@@ -127,11 +127,34 @@ def run_bot(settings: Settings) -> None:
 
     @bot.tree.command(name="tires", description="Show current Lexus tire pressures")
     async def tires(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(_tires_text(settings), ephemeral=True)
+        await interaction.response.send_message(
+            _records_text(settings, _TIRE_LABELS),
+            ephemeral=True,
+        )
 
     @bot.tree.command(name="doors", description="Show saved door and window status")
     async def doors(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(_doors_text(settings), ephemeral=True)
+        await interaction.response.send_message(
+            _records_text(settings, _SECURITY_LABELS),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="locks", description="Show saved Lexus lock status")
+    async def locks(interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            _records_text(settings, _LOCK_LABELS),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="dashboard", description="Open the private Lexus dashboard")
+    async def dashboard(interaction: discord.Interaction) -> None:
+        if not settings.dashboard_url:
+            await interaction.response.send_message(
+                "DASHBOARD_URL is not configured yet.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(settings.dashboard_url, ephemeral=True)
 
     @bot.tree.command(name="refresh", description="Read Home Assistant and save a fresh snapshot")
     async def refresh(interaction: discord.Interaction) -> None:

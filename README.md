@@ -1,30 +1,26 @@
 # Lexus Personal Hub
 
-A read-only personal vehicle-data app with a Lexus dashboard, local trip history, fuel tracking, and optional Discord alerts.
+A read-only personal vehicle-data app with a Lexus dashboard, local trip history, fuel tracking, Discord commands, and optional alerts.
 
-![Status](https://img.shields.io/badge/status-v0.2-black) ![Python](https://img.shields.io/badge/python-3.11%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+![Status](https://img.shields.io/badge/status-v0.3-black) ![Python](https://img.shields.io/badge/python-3.11%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
-## What it does
+## v0.3
 
-- polls vehicle telemetry on a configurable interval
-- stores odometer, fuel level, estimated range, and speed in local SQLite
-- infers trips from odometer movement
-- shows 7-day and 30-day distance totals
-- logs fuel fill-ups and 30-day fuel spend
-- sends optional low-fuel, low-range, and service-due Discord webhook alerts
-- provides `/car`, `/trips`, and `/fuel` Discord slash commands
-- exposes a FastAPI dashboard and JSON API
+- full vehicle-status dashboard
+- odometer, fuel, range and speed
+- tire pressure for all reported tires
+- doors, windows, moonroof, hood and trunk status
+- door-lock status when Home Assistant exposes it
+- next-service and source-update information when available
+- local trip inference and 7/30-day driving analytics
+- fuel fill-up history and 30-day fuel spend
+- Toronto/local-time display using `TIMEZONE`
+- Discord slash-command companion
+- optional Discord webhook alerts
 
-The project intentionally does **not** issue remote vehicle-control commands.
+The project intentionally does **not** issue remote lock/unlock, remote-start, climate, hazard, or other vehicle-control commands.
 
-## Provider design
-
-Two providers are included:
-
-- `mock` — works immediately for development and testing
-- `home_assistant` — reads the owner's Lexus telemetry through the Home Assistant REST API
-
-Home Assistant is the recommended real-data boundary. It keeps this application independent from changes to the upstream Toyota/Lexus account integration.
+## Architecture
 
 ```text
 Lexus / Toyota Connected Services
@@ -39,6 +35,11 @@ Lexus / Toyota Connected Services
  Dashboard  Trips  Discord
 ```
 
+Two providers are included:
+
+- `mock` — development/testing without vehicle credentials
+- `home_assistant` — reads the owner's vehicle entities from the Home Assistant REST API
+
 ## Quick start
 
 ```bash
@@ -47,50 +48,41 @@ cd lexus-personal-hub
 python -m venv .venv
 ```
 
-Windows PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
-Copy-Item .env.example .env
-lexus-hub serve --reload
-```
-
-macOS/Linux:
+Linux/Raspberry Pi OS:
 
 ```bash
 source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env
-lexus-hub serve --reload
+lexus-hub serve --host 0.0.0.0
 ```
 
-Open `http://127.0.0.1:8000`. The default `PROVIDER=mock` works without vehicle credentials.
+The default `PROVIDER=mock` works immediately.
 
-## Connect real Lexus data
+## Connect Home Assistant
 
-Set up a Home Assistant Toyota/Lexus integration first and confirm Home Assistant exposes the vehicle's odometer. Then create a Home Assistant long-lived access token and update your private `.env`:
+Create a Home Assistant long-lived access token and put it only in your private `.env`:
 
 ```dotenv
 PROVIDER=home_assistant
 HA_BASE_URL=http://homeassistant.local:8123
-HA_TOKEN=your_private_home_assistant_token
+HA_TOKEN=
 VEHICLE_DISPLAY_NAME=My Lexus
 ```
 
-Inspect candidate entities without saving vehicle data:
+Discover the vehicle entities:
 
 ```bash
 lexus-hub provider-discover
 ```
 
-Test a live read:
+Test a live read without saving it:
 
 ```bash
 lexus-hub provider-test
 ```
 
-If automatic matching is ambiguous, configure explicit entity IDs:
+If automatic matching is ambiguous, configure explicit entities:
 
 ```dotenv
 HA_ODOMETER_ENTITY=sensor.your_lexus_odometer
@@ -99,68 +91,37 @@ HA_RANGE_ENTITY=sensor.your_lexus_distance_to_empty
 HA_SPEED_ENTITY=sensor.your_lexus_speed
 ```
 
-Only odometer is required. The current Home Assistant provider does not request or store vehicle location.
-
-Save a snapshot manually with:
+Save one snapshot:
 
 ```bash
 lexus-hub poll-once
 ```
 
-When `lexus-hub serve` is running, the app also polls automatically using `POLL_INTERVAL_MINUTES`.
+While the web app is running, snapshots are collected automatically according to `POLL_INTERVAL_MINUTES`.
 
-## Trip detection
+## Dashboard
 
-Trips are inferred from odometer changes. A trip begins when movement reaches `MIN_TRIP_DELTA_KM`, continues while the odometer increases, and closes after `TRIP_IDLE_CLOSE_MINUTES` without movement. Large gaps beyond `MAX_SNAPSHOT_GAP_HOURS` are not treated as continuous known history.
-
-The default 15-minute polling interval means trip start/end timestamps are approximate. Distance is based on odometer differences.
-
-## Fuel tracking
-
-Log a fill-up through the API:
+Run:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/fuel \
-  -H "Content-Type: application/json" \
-  -d '{"liters":42.5,"total_cost":67.95,"odometer_km":42821}'
+lexus-hub serve --host 0.0.0.0
 ```
 
-## Discord
+Open:
 
-For automatic alerts, set:
-
-```dotenv
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+```text
+http://<device-ip>:8000
 ```
 
-For slash commands, set:
-
-```dotenv
-DISCORD_BOT_TOKEN=...
-DISCORD_GUILD_ID=123456789012345678
-```
-
-Then run:
-
-```bash
-lexus-hub bot
-```
-
-Commands:
-
-- `/car` — latest saved status and 7-day distance
-- `/trips` — five most recent inferred trips
-- `/fuel` — log a fill-up
-
-## REST API
+Useful endpoints:
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Health check |
 | `POST /api/poll` | Fetch and save one snapshot |
 | `GET /api/status` | Latest saved status and summary |
-| `GET /api/provider/test` | Test live provider without saving |
-| `GET /api/provider/discover` | Show source entity candidates |
+| `GET /api/provider/test` | Live provider test without saving |
+| `GET /api/provider/discover` | Home Assistant entity discovery |
 | `GET /api/trips` | Recent inferred trips |
 | `GET /api/distance?days=30` | Daily distance series |
 | `GET /api/fuel` | Recent fill-ups |
@@ -168,32 +129,120 @@ Commands:
 
 Interactive API docs are at `/docs`.
 
-## Maintenance alerts
+## Discord bot
+
+Create a Discord application/bot and keep its token only in `.env`:
 
 ```dotenv
-LAST_SERVICE_ODOMETER_KM=40000
-SERVICE_INTERVAL_KM=8000
-LOW_FUEL_PERCENT=20
-LOW_RANGE_KM=80
+DISCORD_BOT_TOKEN=
+DISCORD_GUILD_ID=
 ```
 
-## Docker
+If you have a private remote dashboard address, optionally set:
 
-Build and run directly with Docker:
+```dotenv
+DASHBOARD_URL=
+```
+
+Run the bot as a separate process/container that shares the same `.data` directory as the web app:
+
+```bash
+lexus-hub bot
+```
+
+Commands:
+
+- `/car` — latest saved vehicle summary
+- `/tires` — tire pressures
+- `/doors` — door/window/body-opening status
+- `/locks` — saved lock status
+- `/dashboard` — configured private dashboard URL
+- `/refresh` — read Home Assistant and save a fresh local snapshot
+- `/trips` — five most recent inferred trips
+- `/fuel` — log a fuel fill-up
+
+All bot responses are ephemeral by default.
+
+## Automatic Discord alerts
+
+A Discord webhook can be configured separately from the slash-command bot:
+
+```dotenv
+DISCORD_WEBHOOK_URL=
+LOW_FUEL_PERCENT=20
+LOW_RANGE_KM=80
+LAST_SERVICE_ODOMETER_KM=
+SERVICE_INTERVAL_KM=8000
+```
+
+The current released alert engine covers low fuel, low range and maintenance reminders. Additional v0.3 status fields are already persisted for future alert rules.
+
+## Trip detection
+
+Trips are inferred from odometer movement. A trip starts when odometer movement reaches `MIN_TRIP_DELTA_KM` and closes after `TRIP_IDLE_CLOSE_MINUTES` without further movement. Large snapshot gaps beyond `MAX_SNAPSHOT_GAP_HOURS` are not treated as known continuous travel.
+
+Because Connected Services/Home Assistant telemetry is polled rather than streamed continuously, trip timestamps are approximate. Distance is based on odometer deltas.
+
+## Fuel tracking
+
+Example API request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/fuel \
+  -H "Content-Type: application/json" \
+  -d '{"liters":42.5,"total_cost":67.95,"odometer_km":54631}'
+```
+
+## Docker on Raspberry Pi OS
+
+Build the image:
 
 ```bash
 docker build -t lexus-personal-hub .
-docker run --rm -p 127.0.0.1:8000:8000 --env-file .env \
-  -v "${PWD}/.data:/app/.data" lexus-personal-hub
+mkdir -p .data
 ```
+
+Web dashboard:
+
+```bash
+docker run -d \
+  --name lexus-personal-hub \
+  --restart unless-stopped \
+  --env-file .env \
+  --network host \
+  -v "$PWD/.data:/app/.data" \
+  lexus-personal-hub
+```
+
+Discord bot:
+
+```bash
+docker run -d \
+  --name lexus-personal-hub-bot \
+  --restart unless-stopped \
+  --env-file .env \
+  --network host \
+  -v "$PWD/.data:/app/.data" \
+  lexus-personal-hub \
+  lexus-hub bot
+```
+
+SQLite uses WAL mode, so the dashboard and Discord bot can share the same local database.
+
+## Private remote access
+
+The dashboard should remain private. A simple deployment pattern is to run Tailscale on the Raspberry Pi and on the phone/laptop used to access the dashboard, then browse to the Pi's Tailscale address on port `8000`.
+
+Do not expose port `8000` directly to the public internet. If a public reverse proxy is ever added, add application authentication and TLS first.
 
 ## Privacy and security
 
-- keep real credentials in `.env` or another secret manager
-- `.env`, `.data/`, databases, and logs are ignored by Git
-- do not commit access tokens, VINs, trip databases, or vehicle exports
-- the Home Assistant provider does not request location
-- bind locally unless you intentionally add authentication and TLS
+- keep Home Assistant and Discord credentials in `.env` or another secret manager
+- `.env`, `.data/`, databases and logs are ignored by Git
+- never commit access tokens, VINs, trip databases, exact location exports or webhook URLs
+- `STORE_LOCATION=false` by default
+- the app reads vehicle state; it does not issue vehicle-control commands
+- prefer private-network access such as Tailscale instead of public port forwarding
 
 See `SECURITY.md` for the repository security policy.
 
@@ -209,4 +258,4 @@ GitHub Actions runs linting and tests on Python 3.11 and 3.12.
 
 ## Disclaimer
 
-This project is independent and is not affiliated with, endorsed by, or sponsored by Lexus, Toyota, Home Assistant, or Discord.
+This project is independent and is not affiliated with, endorsed by, or sponsored by Lexus, Toyota, Home Assistant, Discord, or Tailscale.
