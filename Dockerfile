@@ -2,11 +2,11 @@ FROM node:22-alpine AS maplibre-assets
 
 WORKDIR /maplibre
 
-# Pull the published MapLibre npm package during the image build and copy only
-# the browser assets into the final image. This avoids the release dist.zip
-# layout mismatch and keeps Node/npm out of the production image.
+# MapLibre GL JS 5.x still publishes the classic browser bundle used by the
+# dashboard (dist/maplibre-gl.js + dist/maplibre-gl.css). MapLibre 6 is ESM-only,
+# so pin the final 5.x release instead of expecting a removed UMD bundle.
 RUN npm init -y >/dev/null 2>&1 \
-    && npm install --omit=dev --no-audit --no-fund maplibre-gl@6.3.0 \
+    && npm install --omit=dev --no-audit --no-fund maplibre-gl@5.24.0 \
     && test -s node_modules/maplibre-gl/dist/maplibre-gl.js \
     && test -s node_modules/maplibre-gl/dist/maplibre-gl.css \
     && cp node_modules/maplibre-gl/dist/maplibre-gl.js /maplibre/maplibre-gl.js \
