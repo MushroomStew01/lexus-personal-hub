@@ -1,6 +1,6 @@
 # Lexus Garage features
 
-The `/garage` page layers driving intelligence on top of the read-only Home Assistant telemetry bridge.
+The `/garage` page layers driving intelligence on top of the read-only Home Assistant telemetry bridge. The `/app` page is the installable mobile-first companion.
 
 ## Included
 
@@ -13,6 +13,8 @@ The `/garage` page layers driving intelligence on top of the read-only Home Assi
 7. **Trip-complete Discord summaries** — completed trips can post start/end labels, distance, duration, and the private dashboard link.
 8. **Weekly Discord report** — seven-day distance, trip count, average/longest trip, fuel spend, and current tire pressures.
 9. **Maintenance history** — log service type, odometer, cost, notes, and next-due odometer from Discord or REST.
+10. **Vehicle Health Score** — a 0–100 telemetry-readiness score covering freshness, tires, parked security, fuel/range, and service due status. It is not a mechanical diagnostic score.
+11. **Installable phone app / PWA** — `/app` has its own manifest, 192/512 icons, service worker, standalone display mode, mobile navigation, health score, current telemetry, parking summary, and recent trips.
 
 ## Private Pi settings
 
@@ -43,12 +45,45 @@ Automatic alerts, trip summaries, and weekly reports currently use `DISCORD_WEBH
 
 ## Pages
 
-- `/` — vehicle status dashboard
+- `/` — full vehicle status dashboard
+- `/app` — installable mobile Lexus Hub
 - `/garage` — trip replay and driving intelligence
 - `/docs` — FastAPI REST documentation
 
+## Vehicle Health Score
+
+`GET /api/health-score` returns the score, grade, attention count, and individual readiness checks. The scoring engine currently considers:
+
+- Lexus telemetry freshness
+- four reported tire pressures
+- doors/windows/body openings while parked
+- lock state while parked
+- fuel percentage and range
+- configured service interval or Toyota's next-service sensor
+
+Missing sensors are reported as unknown rather than automatically treated as vehicle faults.
+
+## Installing the mobile app
+
+The PWA lives at `/app`. Service workers require a secure browser context, so use a private HTTPS address for installation rather than exposing port 8000 directly to the public internet.
+
+With Tailscale already running on the Pi, a private HTTPS endpoint can be published to the tailnet with:
+
+```bash
+sudo tailscale serve --bg 8000
+tailscale serve status
+```
+
+Open the resulting private HTTPS URL and add `/app`.
+
+- iPhone/iPad: open `/app` in Safari, tap **Share**, then **Add to Home Screen**.
+- Browsers that expose the install prompt will show the app's **Install** button.
+
+The service worker caches only the app shell, manifest, and icons. `/api/*` vehicle data is deliberately network-only so stale telemetry/location is not served from the PWA cache.
+
 ## REST endpoints
 
+- `GET /api/health-score`
 - `GET /api/where`
 - `GET /api/locations`
 - `POST /api/locations/current`
@@ -109,4 +144,4 @@ docker run -d \
 
 The SQLite database remains local under `.data/` and is ignored by Git. Named private zones do not expose their names in trip/parking summaries. Exact route/replay APIs remain disabled unless `SHOW_EXACT_LOCATION=true` is explicitly enabled.
 
-The MapLibre page uses OpenStreetMap raster tiles. The existing route view may also use the configured OSRM server for road-line estimation, which can receive the sampled route coordinates when that map is opened.
+The PWA does not cache `/api/*` responses. The MapLibre page uses OpenStreetMap raster tiles. The existing route view may also use the configured OSRM server for road-line estimation, which can receive the sampled route coordinates when that map is opened.
