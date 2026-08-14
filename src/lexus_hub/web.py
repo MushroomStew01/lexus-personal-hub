@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from html import escape
 from typing import Annotated, Any
@@ -9,7 +10,13 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from .analytics import daily_distance, recent_fuel_fills, recent_trips, status_summary
+from .analytics import (
+    daily_distance,
+    recent_fuel_fills,
+    recent_trips,
+    status_summary,
+    trip_route,
+)
 from .config import get_settings
 from .db import init_db, session_scope
 from .poller import poll_forever, poll_once
@@ -95,6 +102,27 @@ def api_trips(
     settings = get_settings()
     with session_scope() as session:
         return recent_trips(session, settings, limit)
+
+
+@app.get("/api/trips/{trip_id}/route")
+def api_trip_route(trip_id: int) -> dict[str, object]:
+    settings = get_settings()
+    if not settings.store_location:
+        raise HTTPException(
+            status_code=409,
+            detail="Trip location storage is disabled. Set STORE_LOCATION=true first.",
+        )
+    if not settings.show_exact_location:
+        raise HTTPException(
+            status_code=403,
+            detail="Exact trip maps are disabled. Set SHOW_EXACT_LOCATION=true on the private host.",
+        )
+    init_db()
+    with session_scope() as session:
+        route = trip_route(session, settings, trip_id)
+    if route is None:
+        raise HTTPException(status_code=404, detail="Trip not found.")
+    return route
 
 
 @app.get("/api/distance")
@@ -223,6 +251,7 @@ def dashboard() -> HTMLResponse:
     vehicle_status_obj = status.get("vehicle_status")
     vehicle_status = vehicle_status_obj if isinstance(vehicle_status_obj, dict) else {}
     ready = bool(status.get("ready"))
+    trip_maps_enabled = bool(status.get("trip_maps_enabled"))
 
     metrics = "".join(
         [
@@ -298,17 +327,29 @@ def dashboard() -> HTMLResponse:
     chart_html = "".join(chart_bars)
 
     if trips:
-        trip_rows = "".join(
-            "<tr>"
-            f"<td>{escape(_pretty_time(item.get('started_at')))}</td>"
-            f"<td>{escape(_pretty_time(item.get('ended_at')))}</td>"
-            f"<td>{escape(_fmt(item.get('distance_km'), ' km'))}</td>"
-            f"<td>{'Active' if item.get('is_open') else 'Complete'}</td>"
-            "</tr>"
-            for item in trips
-        )
+        trip_rows_list: list[str] = []
+        for item in trips:
+            route_control = "—"
+            if trip_maps_enabled and item.get("has_route"):
+                route_control = (
+                    "<button class='route-button' type='button' data-trip-id='"
+                    + escape(str(item.get("id")))
+                    + "'>View route</button>"
+                )
+            elif trip_maps_enabled:
+                route_control = "<span class='muted'>No GPS yet</span>"
+            trip_rows_list.append(
+                "<tr>"
+                f"<td>{escape(_pretty_time(item.get('started_at')))}</td>"
+                f"<td>{escape(_pretty_time(item.get('ended_at')))}</td>"
+                f"<td>{escape(_fmt(item.get('distance_km'), ' km'))}</td>"
+                f"<td>{'Active' if item.get('is_open') else 'Complete'}</td>"
+                f"<td>{route_control}</td>"
+                "</tr>"
+            )
+        trip_rows = "".join(trip_rows_list)
     else:
-        trip_rows = "<tr><td colspan='4' class='empty'>No trips detected yet.</td></tr>"
+        trip_rows = "<tr><td colspan='5' class='empty'>No trips detected yet.</td></tr>"
 
     if fills:
         fuel_rows = "".join(
@@ -356,13 +397,32 @@ def dashboard() -> HTMLResponse:
         else "<div class='notice'>No saved snapshot yet. Run <code>lexus-hub poll-once</code>.</div>"
     )
 
+    if trip_maps_enabled:
+        map_notice = (
+            "<div class='map-note'>Trip maps are private and use stored Lexus GPS samples. "
+            "The road line is an estimate generated from those samples.</div>"
+        )
+    elif settings.store_location:
+        map_notice = (
+            "<div class='map-note'>Location collection is on, but trip maps are hidden. "
+            "Set <code>SHOW_EXACT_LOCATION=true</code> on this private host to enable them.</div>"
+        )
+    else:
+        map_notice = (
+            "<div class='map-note'>Trip maps are off. Set <code>STORE_LOCATION=true</code> and "
+            "<code>SHOW_EXACT_LOCATION=true</code> in the Pi's private <code>.env</code>.</div>"
+        )
+
+    router_url_json = json.dumps(settings.map_router_url.rstrip("/"))
+    refresh_ms = settings.dashboard_refresh_seconds * 1000
+
     html = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="{settings.dashboard_refresh_seconds}">
 <title>{escape(settings.vehicle_display_name)} · Lexus Personal Hub</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.css">
 <style>
 :root{{--bg:#090d12;--panel:#111820;--panel2:#151e28;--line:#283442;--text:#f6f7f9;
 --muted:#8ea0b2;--accent:#d8dde5;--good:#47d18c;--bad:#ff6b6b;--warn:#ffcc66}}
@@ -402,11 +462,20 @@ border-bottom:1px solid var(--line)}}td{{padding:10px 6px;border-bottom:1px soli
 .empty{{color:var(--muted);text-align:center;padding:24px}}.notice{{padding:12px 14px;border:1px solid #6d5a2f;
 background:#2b2414;border-radius:12px;margin-bottom:14px;color:#ffe3a3}}
 .links{{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:.85rem;margin-top:20px}}
+.muted{{color:var(--muted)}}.map-note{{color:var(--muted);font-size:.78rem;line-height:1.5;margin:-6px 0 12px}}
+.route-button,.map-close{{appearance:none;border:1px solid #38516a;background:#162535;color:#9ed3ff;
+border-radius:9px;padding:6px 9px;font:inherit;cursor:pointer}}.route-button:hover,.map-close:hover{{background:#1e3247}}
+.map-panel{{margin-top:14px}}.map-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;
+margin-bottom:14px}}.map-subtitle{{color:var(--muted);font-size:.82rem;margin-top:5px}}#trip-map{{height:430px;
+border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#0d141b}}
+.map-status{{color:var(--muted);font-size:.78rem;margin-top:10px}}.hidden{{display:none!important}}
+.maplibregl-ctrl-attrib{{font-size:10px}}
 @media(max-width:1000px){{.metrics{{grid-template-columns:repeat(3,1fr)}}.section-grid{{grid-template-columns:1fr 1fr}}
 .section-grid .panel:first-child{{grid-column:1/-1}}.wide,.table-grid{{grid-template-columns:1fr}}}}
 @media(max-width:620px){{main{{padding:24px 14px 50px}}header{{align-items:flex-start;flex-direction:column}}
 h1{{font-size:2rem}}.metrics{{grid-template-columns:repeat(2,1fr)}}.section-grid{{grid-template-columns:1fr}}
-.section-grid .panel:first-child{{grid-column:auto}}.tires{{grid-template-columns:repeat(2,1fr)}}}}
+.section-grid .panel:first-child{{grid-column:auto}}.tires{{grid-template-columns:repeat(2,1fr)}}#trip-map{{height:340px}}
+.table-grid .panel{{overflow-x:auto}}}}
 </style>
 </head>
 <body><main>
@@ -430,17 +499,176 @@ h1{{font-size:2rem}}.metrics{{grid-template-columns:repeat(2,1fr)}}.section-grid
 </section>
 
 <section class="grid table-grid">
-<article class="panel"><h2>Recent trips</h2>
-<table><thead><tr><th>Start</th><th>End</th><th>Distance</th><th>Status</th></tr></thead>
+<article class="panel"><h2>Recent trips</h2>{map_notice}
+<table><thead><tr><th>Start</th><th>End</th><th>Distance</th><th>Status</th><th>Map</th></tr></thead>
 <tbody>{trip_rows}</tbody></table></article>
 <article class="panel"><h2>Fuel history</h2>
 <table><thead><tr><th>Date</th><th>Litres</th><th>Cost</th><th>Station</th></tr></thead>
 <tbody>{fuel_rows}</tbody></table></article>
 </section>
 
+<article id="trip-map-panel" class="panel map-panel hidden">
+<div class="map-head"><div><h2 id="trip-map-title">Trip route</h2>
+<div id="trip-map-subtitle" class="map-subtitle"></div></div>
+<button id="trip-map-close" class="map-close" type="button">Close map</button></div>
+<div id="trip-map"></div><div id="trip-map-status" class="map-status"></div>
+</article>
+
 <div class="links">
 <a href="/docs">API docs</a><a href="/api/status">Status JSON</a>
 <a href="/api/provider/discover">Provider discovery</a><a href="/api/provider/test">Provider test</a>
 </div>
-</main></body></html>"""
+</main>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.js"></script>
+<script>
+const routerBase = {router_url_json};
+let tripMap = null;
+let startMarker = null;
+let endMarker = null;
+let activeTripId = null;
+
+function sampleWaypoints(coords, maxPoints = 20) {{
+  if (coords.length <= maxPoints) return coords;
+  const sampled = [coords[0]];
+  const step = (coords.length - 1) / (maxPoints - 1);
+  for (let i = 1; i < maxPoints - 1; i += 1) {{
+    sampled.push(coords[Math.round(i * step)]);
+  }}
+  sampled.push(coords[coords.length - 1]);
+  return sampled;
+}}
+
+function mapStyle() {{
+  return {{
+    version: 8,
+    sources: {{
+      osm: {{
+        type: 'raster',
+        tiles: ['https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png'],
+        tileSize: 256,
+        attribution: '© OpenStreetMap contributors'
+      }}
+    }},
+    layers: [{{id: 'osm-tiles', type: 'raster', source: 'osm'}}]
+  }};
+}}
+
+function renderRoute(storedCoords, routeCoords) {{
+  const geojson = {{
+    type: 'Feature',
+    properties: {{}},
+    geometry: {{type: 'LineString', coordinates: routeCoords}}
+  }};
+  const draw = () => {{
+    const source = tripMap.getSource('trip-route');
+    if (source) {{
+      source.setData(geojson);
+    }} else {{
+      tripMap.addSource('trip-route', {{type: 'geojson', data: geojson}});
+      tripMap.addLayer({{
+        id: 'trip-route-line',
+        type: 'line',
+        source: 'trip-route',
+        layout: {{'line-join': 'round', 'line-cap': 'round'}},
+        paint: {{'line-color': '#2789d8', 'line-width': 5, 'line-opacity': 0.9}}
+      }});
+    }}
+    if (startMarker) startMarker.remove();
+    if (endMarker) endMarker.remove();
+    startMarker = new maplibregl.Marker({{color: '#27ae60'}})
+      .setLngLat(storedCoords[0]).setPopup(new maplibregl.Popup().setText('Trip start')).addTo(tripMap);
+    endMarker = new maplibregl.Marker({{color: '#d64545'}})
+      .setLngLat(storedCoords[storedCoords.length - 1])
+      .setPopup(new maplibregl.Popup().setText('Trip end')).addTo(tripMap);
+    const bounds = new maplibregl.LngLatBounds();
+    routeCoords.forEach(coord => bounds.extend(coord));
+    tripMap.fitBounds(bounds, {{padding: 55, maxZoom: 16, duration: 500}});
+  }};
+  if (!tripMap) {{
+    tripMap = new maplibregl.Map({{
+      container: 'trip-map',
+      style: mapStyle(),
+      center: storedCoords[0],
+      zoom: 12,
+      attributionControl: true
+    }});
+    tripMap.addControl(new maplibregl.NavigationControl(), 'top-right');
+    tripMap.once('load', draw);
+  }} else if (tripMap.loaded()) {{
+    draw();
+    tripMap.resize();
+  }} else {{
+    tripMap.once('load', draw);
+  }}
+}}
+
+async function loadTripRoute(tripId) {{
+  activeTripId = tripId;
+  const panel = document.getElementById('trip-map-panel');
+  const subtitle = document.getElementById('trip-map-subtitle');
+  const status = document.getElementById('trip-map-status');
+  panel.classList.remove('hidden');
+  subtitle.textContent = 'Loading stored Lexus GPS points…';
+  status.textContent = '';
+  panel.scrollIntoView({{behavior: 'smooth', block: 'start'}});
+
+  try {{
+    const response = await fetch(`/api/trips/${{tripId}}/route`, {{headers: {{Accept: 'application/json'}}}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Unable to load trip route.');
+    if (activeTripId !== tripId) return;
+    const storedCoords = (data.points || [])
+      .map(point => [Number(point.longitude), Number(point.latitude)])
+      .filter(coord => Number.isFinite(coord[0]) && Number.isFinite(coord[1]));
+    if (storedCoords.length < 2) {{
+      throw new Error('This trip does not have enough stored GPS points yet.');
+    }}
+
+    let routeCoords = storedCoords;
+    let routeLabel = `Stored Lexus GPS path · ${{storedCoords.length}} point${{storedCoords.length === 1 ? '' : 's'}}`;
+    const waypoints = sampleWaypoints(storedCoords);
+    try {{
+      const encoded = waypoints.map(coord => `${{coord[0]}},${{coord[1]}}`).join(';');
+      const routeResponse = await fetch(
+        `${{routerBase}}/route/v1/driving/${{encoded}}?overview=full&geometries=geojson&steps=false`,
+        {{headers: {{Accept: 'application/json'}}}}
+      );
+      const routeData = await routeResponse.json();
+      const routed = routeData?.routes?.[0]?.geometry?.coordinates;
+      if (routeResponse.ok && Array.isArray(routed) && routed.length >= 2) {{
+        routeCoords = routed;
+        routeLabel = storedCoords.length > 2
+          ? `Estimated road route through ${{storedCoords.length}} stored Lexus GPS samples`
+          : 'Estimated road route between stored trip start and end';
+      }}
+    }} catch (_routerError) {{
+      routeLabel += ' · road router unavailable';
+    }}
+
+    document.getElementById('trip-map-title').textContent = `Trip #${{data.id}} · ${{data.distance_km}} km`;
+    subtitle.textContent = `${{data.started_at || '—'}} → ${{data.ended_at || 'Active'}}`;
+    status.textContent = `${{routeLabel}}. Road geometry is an estimate, not a turn-by-turn vehicle trace.`;
+    renderRoute(storedCoords, routeCoords);
+  }} catch (error) {{
+    subtitle.textContent = 'Route unavailable';
+    status.textContent = error instanceof Error ? error.message : String(error);
+  }}
+}}
+
+document.querySelectorAll('.route-button').forEach(button => {{
+  button.addEventListener('click', () => loadTripRoute(Number(button.dataset.tripId)));
+}});
+
+document.getElementById('trip-map-close').addEventListener('click', () => {{
+  activeTripId = null;
+  document.getElementById('trip-map-panel').classList.add('hidden');
+}});
+
+setInterval(() => {{
+  if (document.getElementById('trip-map-panel').classList.contains('hidden')) {{
+    window.location.reload();
+  }}
+}}, {refresh_ms});
+</script>
+</body></html>"""
     return HTMLResponse(html)
