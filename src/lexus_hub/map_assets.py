@@ -13,7 +13,10 @@ from starlette.requests import Request
 
 router = APIRouter(tags=["map assets"])
 
-_MAPLIBRE_VERSION = "6.3.0"
+# Keep the runtime fallback on the same classic browser-bundle release that is
+# vendored into Docker. MapLibre 6 is ESM-only, while this dashboard currently
+# uses the v5 UMD/global `maplibregl` build.
+_MAPLIBRE_VERSION = "5.24.0"
 _MAPLIBRE_BASE = (
     "https://cdn.jsdelivr.net/npm/"
     f"maplibre-gl@{_MAPLIBRE_VERSION}/dist"
