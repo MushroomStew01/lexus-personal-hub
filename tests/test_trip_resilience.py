@@ -201,13 +201,16 @@ def test_trip_diagnostics_explain_latest_movement_signal():
         assert result["open_trip_id"] is not None
 
 
-def test_dashboard_injects_same_origin_map_fallback():
+def test_dashboard_uses_vendored_maplibre_and_keeps_fallback():
     app = FastAPI()
 
     @app.get("/", response_class=HTMLResponse)
     def page() -> HTMLResponse:
         return HTMLResponse(
-            '<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.js"></script>'
+            '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/'
+            'maplibre-gl@6.3.0/dist/maplibre-gl.css">'
+            '<script src="https://cdn.jsdelivr.net/npm/'
+            'maplibre-gl@6.3.0/dist/maplibre-gl.js"></script>'
             "<script>window.test = true;</script>"
         )
 
@@ -217,7 +220,10 @@ def test_dashboard_injects_same_origin_map_fallback():
 
     page_response = client.get("/")
     assert page_response.status_code == 200
+    assert '<link rel="stylesheet" href="/vendor/maplibre-gl.css">' in page_response.text
+    assert '<script src="/vendor/maplibre-gl.js"></script>' in page_response.text
     assert '<script src="/map-fallback.js"></script>' in page_response.text
+    assert "cdn.jsdelivr.net" not in page_response.text
 
     fallback_response = client.get("/map-fallback.js")
     assert fallback_response.status_code == 200
