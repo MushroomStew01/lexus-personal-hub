@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Resilience helpers for trip diagnostics and dashboard route rendering."""
+
+from __future__ import annotations
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
@@ -188,8 +188,10 @@ def map_fallback_js() -> Response:
       const latSpan = Math.max(0.00001, maxLat - minLat);
 
       const project = coord => {
-        const x = padding + ((Number(coord[0]) - minLon) / lonSpan) * (width - padding * 2);
-        const y = height - padding - ((Number(coord[1]) - minLat) / latSpan) * (height - padding * 2);
+        const x = padding
+          + ((Number(coord[0]) - minLon) / lonSpan) * (width - padding * 2);
+        const y = height - padding
+          - ((Number(coord[1]) - minLat) / latSpan) * (height - padding * 2);
         return [x, y];
       };
 
