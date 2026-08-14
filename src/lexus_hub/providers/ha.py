@@ -119,6 +119,22 @@ class HAProvider:
         except ValueError:
             return None
 
+    @staticmethod
+    def _coordinates(state: dict[str, Any] | None) -> tuple[float | None, float | None]:
+        if not state:
+            return None, None
+        attrs = state.get("attributes") or {}
+        latitude = attrs.get("latitude")
+        longitude = attrs.get("longitude")
+        try:
+            lat = float(latitude) if latitude is not None else None
+            lon = float(longitude) if longitude is not None else None
+        except (TypeError, ValueError):
+            return None, None
+        if lat is None or lon is None or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            return None, None
+        return lat, lon
+
     def _vehicle_states(self, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
         match = self.settings.vehicle_display_name.strip().lower()
         if not match or match == "my lexus":
@@ -144,6 +160,20 @@ class HAProvider:
             if any(term in self._text(item) for term in terms)
         ]
         return candidates[0] if candidates else None
+
+    def _location_state(self, states: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if self.settings.ha_location_entity:
+            return self._find(states, self.settings.ha_location_entity, ())
+        vehicle_states = self._vehicle_states(states)
+        for terms in (
+            ("current location", "current_location"),
+            ("last parked location", "last_parked_location"),
+            ("parking location", "parking_location"),
+        ):
+            found = self._find(vehicle_states, None, terms)
+            if found is not None and self._coordinates(found) != (None, None):
+                return found
+        return None
 
     @staticmethod
     def _friendly_name(state: dict[str, Any]) -> str:
@@ -233,6 +263,8 @@ class HAProvider:
             ("distance to empty", "distance_to_empty", "fuel range"),
         )
         speed = self._find(states, self.settings.ha_speed_entity, ("speed",))
+        location = self._location_state(states)
+        latitude, longitude = self._coordinates(location)
         status = self._status_map(states)
         source_updated_at = self._parse_ha_timestamp(odometer.get("last_updated"))
         return VehicleReading(
@@ -245,6 +277,8 @@ class HAProvider:
             fuel_percent=self._number(fuel),
             range_km=self._distance_km(range_state),
             speed_kph=self._speed_kph(speed),
+            latitude=latitude,
+            longitude=longitude,
             raw={"status": status},
         )
 
@@ -269,6 +303,8 @@ class HAProvider:
                     "trunk",
                     "next service",
                     "last update",
+                    "current location",
+                    "last parked location",
                 )
             ):
                 attrs = item.get("attributes") or {}
@@ -280,9 +316,11 @@ class HAProvider:
                         "unit": attrs.get("unit_of_measurement"),
                     }
                 )
+        location = self._location_state(states)
         return {
             "provider": self.name,
             "vehicle": self.settings.vehicle_display_name,
+            "location_entity": location.get("entity_id") if location else None,
             "candidates": candidates,
             "status": self._status_map(states),
         }
