@@ -117,11 +117,16 @@ function makeMap(container,center,zoom){
  const map=new maplibregl.Map({container,style:rasterStyle,center,zoom,minZoom:2,maxZoom:19});
  map.addControl(new maplibregl.NavigationControl(),'top-right');
  if(maplibregl.FullscreenControl)map.addControl(new maplibregl.FullscreenControl(),'top-right');
- if(maplibregl.ScaleControl)map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
+ if(maplibregl.ScaleControl){
+  map.addControl(new maplibregl.ScaleControl({unit:'metric'}),'bottom-left');
+ }
  return map;
 }
-function fitMap(map,coords,maxZoom=16){if(!coords.length)return;const b=new maplibregl.LngLatBounds();
-coords.forEach(c=>b.extend(c));map.fitBounds(b,{padding:65,maxZoom,duration:500})}
+function fitMap(map,coords,maxZoom=16){
+ if(!coords.length)return;
+ const b=new maplibregl.LngLatBounds();
+ coords.forEach(c=>b.extend(c));map.fitBounds(b,{padding:65,maxZoom,duration:500})
+}
 function haversine(a,b){const r=6371000,toRad=x=>x*Math.PI/180;const p1=toRad(a[1]);
 const p2=toRad(b[1]);const dp=toRad(b[1]-a[1]);const dl=toRad(b[0]-a[0]);
 const q=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
@@ -177,9 +182,12 @@ async function loadMaintenance(){const d=await getJSON('/api/maintenance?limit=6
 document.querySelector('#maintenance').innerHTML=d.length?d.map(x=>`<div class="row"><span>${
 x.kind}</span><span class="muted">${x.odometer_km===null?'—':x.odometer_km+' km'}</span>
 </div>`).join(''):'<div class="muted">No maintenance records yet.</div>'}
-async function loadTimeline(){const d=await getJSON('/api/timeline?limit=10');document.querySelector(
-'#timeline').innerHTML=d.length?d.map(x=>`<div class="timeline-item"><div>${x.text}</div>
-<div class="muted">${x.at}</div></div>`).join(''):'<div class="muted">No events yet.</div>'}
+async function loadTimeline(){
+ const d=await getJSON('/api/timeline?limit=10');
+ document.querySelector('#timeline').innerHTML=d.length?d.map(x=>
+ `<div class="timeline-item"><div>${x.text}</div><div class="muted">${x.at}</div></div>`
+ ).join(''):'<div class="muted">No events yet.</div>'
+}
 async function loadTrips(){const d=await getJSON('/api/trips?limit=10');const root=
 document.querySelector('#trip-list');root.innerHTML='';d.forEach(t=>{const b=document.createElement(
 'button');b.type='button';b.textContent=`${t.start_label||'Start'} → ${t.end_label||'End'} · ${
@@ -202,8 +210,8 @@ Number(slider.value)/1000;const speed=Number(document.querySelector('#replay-spe
 const duration=12000/speed;replayStartedAt=performance.now();button.textContent='Pause';
 const tick=now=>{const elapsed=now-replayStartedAt;const f=Math.min(1,replayStartValue+
 elapsed/duration*(1-replayStartValue));setReplayFraction(f);if(f<1)replayFrame=
-requestAnimationFrame(tick);else{replayFrame=null;replayStartedAt=null;button.textContent='Replay again';
-slider.value='0'}};replayFrame=requestAnimationFrame(tick)}
+requestAnimationFrame(tick);else{replayFrame=null;replayStartedAt=null;
+button.textContent='Replay again';slider.value='0'}};replayFrame=requestAnimationFrame(tick)}
 async function showTrip(id,button){stopReplay();document.querySelectorAll('#trip-list button')
 .forEach(b=>b.classList.toggle('active',b===button));const status=document.querySelector(
 '#trip-status');status.textContent='Loading trip and road geometry…';try{const [route,replay]=
@@ -213,15 +221,20 @@ if(stored.length<2)throw new Error('This trip does not have two usable GPS point
 await roadRoute(stored);replayPoints=(replay.points||[]).filter(p=>Number.isFinite(Number(
 p.latitude))&&Number.isFinite(Number(p.longitude)));if(!replayPoints.length)replayPoints=
 (route.points||[]);const draw=()=>{addLine(tripMap,'trip-route',routeCoords,'#3198e6',5);
-if(startMarker)startMarker.remove();if(endMarker)endMarker.remove();startMarker=new maplibregl.Marker(
-{color:'#47d18c'}).setLngLat(stored[0]).setPopup(new maplibregl.Popup().setText(
-route.start_label||'Trip start')).addTo(tripMap);endMarker=new maplibregl.Marker({color:'#ff5f5f'})
-.setLngLat(stored.at(-1)).setPopup(new maplibregl.Popup().setText(route.end_label||'Trip end'))
-.addTo(tripMap);fitMap(tripMap,routeCoords,16);setReplayFraction(0)};if(!tripMap){tripMap=
+if(startMarker)startMarker.remove();
+if(endMarker)endMarker.remove();
+startMarker=new maplibregl.Marker({color:'#47d18c'}).setLngLat(stored[0])
+.setPopup(new maplibregl.Popup().setText(route.start_label||'Trip start')).addTo(tripMap);
+endMarker=new maplibregl.Marker({color:'#ff5f5f'}).setLngLat(stored.at(-1))
+.setPopup(new maplibregl.Popup().setText(route.end_label||'Trip end')).addTo(tripMap);
+fitMap(tripMap,routeCoords,16);setReplayFraction(0)};if(!tripMap){tripMap=
 makeMap('trip-map',stored[0],13);tripMap.once('load',draw)}else if(mapIsReady(tripMap))draw();
-else tripMap.once('load',draw);const slider=document.querySelector('#replay-slider');slider.disabled=
-false;slider.value='0';slider.oninput=e=>{stopReplay();setReplayFraction(Number(e.target.value)/1000)};
-const play=document.querySelector('#replay-play');play.disabled=false;play.textContent='Play replay';
+else tripMap.once('load',draw);
+const slider=document.querySelector('#replay-slider');
+slider.disabled=false;slider.value='0';
+slider.oninput=e=>{stopReplay();setReplayFraction(Number(e.target.value)/1000)};
+const play=document.querySelector('#replay-play');
+play.disabled=false;play.textContent='Play replay';
 status.textContent=`${route.start_label||'Start'} → ${route.end_label||'End'} · ${
 route.distance_km} km · ${stored.length} Lexus GPS sample${stored.length===1?'':'s'}`;
 }catch(e){status.textContent=`Trip replay error: ${e.message}`}}
