@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     max_snapshot_gap_hours: float = Field(default=6, gt=0)
     store_location: bool = False
     show_exact_location: bool = False
+    named_location_default_radius_m: float = Field(default=250, ge=25, le=5000)
+    parking_speed_threshold_kph: float = Field(default=1.0, ge=0, le=20)
 
     vehicle_display_name: str = "My Lexus"
     last_service_odometer_km: float | None = None
@@ -39,6 +41,12 @@ class Settings(BaseSettings):
     low_range_km: float = Field(default=80, ge=0)
     low_tire_psi: float = Field(default=30, ge=0, le=100)
     alert_openings: bool = False
+    alert_unlocked: bool = False
+    stale_telemetry_minutes: int = Field(default=180, ge=30, le=10080)
+    trip_summary_enabled: bool = True
+    weekly_report_enabled: bool = True
+    weekly_report_weekday: int = Field(default=6, ge=0, le=6)
+    weekly_report_hour: int = Field(default=19, ge=0, le=23)
 
     ha_base_url: str = "http://homeassistant.local:8123"
     ha_token: str | None = None
