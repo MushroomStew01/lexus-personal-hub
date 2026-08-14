@@ -8,6 +8,16 @@ from discord import app_commands
 from .analytics import recent_trips, status_summary
 from .config import Settings
 from .db import init_db, session_scope
+from .insights import (
+    add_maintenance_record,
+    add_named_location_from_current,
+    current_vehicle_location,
+    fuel_analytics,
+    maintenance_history,
+    named_locations,
+    vehicle_timeline,
+    weekly_summary,
+)
 from .poller import poll_once
 from .storage import add_fuel_fill, primary_vehicle
 
@@ -156,6 +166,75 @@ def run_bot(settings: Settings) -> None:
             return
         await interaction.response.send_message(settings.dashboard_url, ephemeral=True)
 
+    @bot.tree.command(name="where", description="Show the latest saved Lexus parking location")
+    async def where(interaction: discord.Interaction) -> None:
+        with session_scope() as session:
+            location = current_vehicle_location(session, settings)
+        if not location.get("ready"):
+            text = "No saved vehicle location yet."
+        else:
+            text = (
+                f"📍 **{location.get('label', 'Unknown location')}**\n"
+                f"Fuel: {_fmt(location.get('fuel_percent'), '%')} · "
+                f"Range: {_fmt(location.get('range_km'), ' km')}\n"
+                f"Last saved: {location.get('observed_at') or '—'}"
+            )
+            if location.get("parked_since"):
+                text += f"\nParked since: {location['parked_since']}"
+            if settings.dashboard_url:
+                text += f"\n{settings.dashboard_url}"
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @bot.tree.command(name="locations", description="List saved named Lexus locations")
+    async def locations(interaction: discord.Interaction) -> None:
+        with session_scope() as session:
+            items = named_locations(session, settings)
+        if not items:
+            text = "No named locations yet. Use `/location_add` while the Lexus is there."
+        else:
+            text = "\n".join(
+                f"• **{item['name']}** · {item['radius_m']} m"
+                + (" · private" if item["is_private"] else "")
+                for item in items
+            )
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @bot.tree.command(name="location_add", description="Name the Lexus's current saved location")
+    @app_commands.describe(
+        name="Location name, for example Home or Work",
+        radius_m="Geofence radius in metres",
+        is_private="Hide the location name in notifications",
+    )
+    async def location_add(
+        interaction: discord.Interaction,
+        name: str,
+        radius_m: float | None = None,
+        is_private: bool = False,
+    ) -> None:
+        if radius_m is not None and not 25 <= radius_m <= 5000:
+            await interaction.response.send_message(
+                "Radius must be between 25 and 5000 metres.",
+                ephemeral=True,
+            )
+            return
+        try:
+            with session_scope() as session:
+                location = add_named_location_from_current(
+                    session,
+                    settings,
+                    name=name,
+                    radius_m=radius_m,
+                    is_private=is_private,
+                )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Saved **{location.name}** with a {location.radius_m:.0f} m radius"
+            + (" as a private zone." if location.is_private else "."),
+            ephemeral=True,
+        )
+
     @bot.tree.command(name="refresh", description="Read Home Assistant and save a fresh snapshot")
     async def refresh(interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -173,8 +252,36 @@ def run_bot(settings: Settings) -> None:
         text = "No detected trips yet."
         if items:
             text = "\n".join(
-                f"• {item['started_at']}: {item['distance_km']} km"
+                f"• **{item['start_label']} → {item['end_label']}** · "
+                f"{item['distance_km']} km · {item['started_at']}"
                 for item in items
+            )
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @bot.tree.command(name="timeline", description="Show recent Lexus activity")
+    async def timeline(interaction: discord.Interaction) -> None:
+        with session_scope() as session:
+            items = vehicle_timeline(session, settings, limit=12)
+        text = "No vehicle activity yet."
+        if items:
+            text = "\n".join(f"• {item['at']} · {item['text']}" for item in items)
+        await interaction.response.send_message(text[:1900], ephemeral=True)
+
+    @bot.tree.command(name="fuelstats", description="Show fuel economy and spending analytics")
+    async def fuelstats(interaction: discord.Interaction) -> None:
+        with session_scope() as session:
+            stats = fuel_analytics(session, settings)
+        if not stats.get("ready"):
+            text = "No fuel data yet."
+        else:
+            economy = stats.get("average_l_per_100km")
+            cost_per_km = stats.get("average_cost_per_km")
+            text = (
+                f"⛽ **Fuel analytics**\n"
+                f"30-day spend: ${stats['spend_30d']:.2f} · {stats['liters_30d']} L\n"
+                f"Average economy: {economy if economy is not None else '—'} L/100 km\n"
+                f"Average cost: ${cost_per_km if cost_per_km is not None else '—'} / km\n"
+                f"Logged fill-ups: {stats['fill_count']}"
             )
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -182,7 +289,7 @@ def run_bot(settings: Settings) -> None:
     @app_commands.describe(
         liters="Litres added",
         total_cost="Total price paid",
-        odometer_km="Current odometer in kilometres",
+        odometer_km="Current odometer in kilometres; omit to use the latest Lexus reading",
     )
     async def fuel(
         interaction: discord.Interaction,
@@ -212,8 +319,74 @@ def run_bot(settings: Settings) -> None:
                 odometer_km=odometer_km,
             )
         await interaction.response.send_message(
-            f"Logged {fill.liters:.1f} L for ${fill.total_cost:.2f}.",
+            f"Logged {fill.liters:.1f} L for ${fill.total_cost:.2f} at "
+            f"{_fmt(fill.odometer_km, ' km')}.",
             ephemeral=True,
         )
+
+    @bot.tree.command(name="maintenance", description="Show recent Lexus maintenance history")
+    async def maintenance(interaction: discord.Interaction) -> None:
+        with session_scope() as session:
+            items = maintenance_history(session, settings, limit=8)
+        if not items:
+            text = "No maintenance records yet."
+        else:
+            text = "\n".join(
+                f"• **{item['kind']}** · {item['performed_at']} · "
+                f"{_fmt(item['odometer_km'], ' km')}"
+                for item in items
+            )
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @bot.tree.command(name="maintenance_add", description="Log a Lexus maintenance event")
+    @app_commands.describe(
+        kind="Oil change, tire rotation, brakes, detailing, etc.",
+        cost="Optional total cost",
+        next_due_km="Optional odometer when this service is next due",
+        notes="Optional notes",
+    )
+    async def maintenance_add(
+        interaction: discord.Interaction,
+        kind: str,
+        cost: float | None = None,
+        next_due_km: float | None = None,
+        notes: str | None = None,
+    ) -> None:
+        if cost is not None and cost < 0:
+            await interaction.response.send_message("Cost cannot be negative.", ephemeral=True)
+            return
+        try:
+            with session_scope() as session:
+                record = add_maintenance_record(
+                    session,
+                    settings,
+                    kind=kind,
+                    cost=cost,
+                    notes=notes,
+                    next_due_km=next_due_km,
+                )
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Logged **{record.kind}** at {_fmt(record.odometer_km, ' km')}.",
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="weekly", description="Show the current seven-day driving summary")
+    async def weekly(interaction: discord.Interaction) -> None:
+        with session_scope() as session:
+            summary = weekly_summary(session, settings)
+        if not summary.get("ready"):
+            text = "No saved vehicle data yet."
+        else:
+            text = (
+                f"📊 **7-day driving summary**\n"
+                f"Distance: {summary['distance_km']} km · Trips: {summary['trip_count']}\n"
+                f"Average trip: {summary['average_trip_km']} km · "
+                f"Longest: {summary['longest_trip_km']} km\n"
+                f"Fuel spend: ${summary['fuel_spend']:.2f} · {summary['fuel_liters']} L"
+            )
+        await interaction.response.send_message(text, ephemeral=True)
 
     bot.run(settings.discord_bot_token, log_handler=None)
