@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """Aggregate the account owner's locally stored vehicle history for the dashboard."""
 
+import json
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,10 +16,22 @@ from .storage import primary_vehicle
 from .timeutil import utcnow
 
 
-def _iso(value: datetime | None) -> str | None:
+def _local_iso(value: datetime | None, settings: Settings) -> str | None:
     if value is None:
         return None
-    return value.replace(tzinfo=UTC).isoformat() if value.tzinfo is None else value.isoformat()
+    source = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return source.astimezone(ZoneInfo(settings.timezone)).isoformat()
+
+
+def _snapshot_status(snapshot: Snapshot | None) -> dict[str, object]:
+    if snapshot is None or not snapshot.raw_json:
+        return {}
+    try:
+        payload = json.loads(snapshot.raw_json)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return status if isinstance(status, dict) else {}
 
 
 def status_summary(session: Session, settings: Settings) -> dict[str, object]:
@@ -46,11 +59,29 @@ def status_summary(session: Session, settings: Settings) -> dict[str, object]:
             Trip.started_at >= cutoff_30d,
         )
     )
+    trip_count_30d = session.scalar(
+        select(func.count(Trip.id)).where(
+            Trip.vehicle_id == vehicle.id,
+            Trip.started_at >= cutoff_30d,
+        )
+    )
     fuel_spend_30d = session.scalar(
         select(func.coalesce(func.sum(FuelFill.total_cost), 0.0)).where(
             FuelFill.vehicle_id == vehicle.id,
             FuelFill.filled_at >= cutoff_30d,
         )
+    )
+    fuel_fill_count_30d = session.scalar(
+        select(func.count(FuelFill.id)).where(
+            FuelFill.vehicle_id == vehicle.id,
+            FuelFill.filled_at >= cutoff_30d,
+        )
+    )
+    latest_trip = session.scalar(
+        select(Trip)
+        .where(Trip.vehicle_id == vehicle.id)
+        .order_by(Trip.started_at.desc())
+        .limit(1)
     )
 
     next_service = None
@@ -60,6 +91,8 @@ def status_summary(session: Session, settings: Settings) -> dict[str, object]:
         if latest and latest.odometer_km is not None:
             service_remaining = next_service - latest.odometer_km
 
+    count = int(trip_count_30d or 0)
+    distance_30 = float(distance_30d or 0.0)
     return {
         "ready": latest is not None,
         "provider": vehicle.provider,
@@ -73,13 +106,27 @@ def status_summary(session: Session, settings: Settings) -> dict[str, object]:
         "fuel_percent": latest.fuel_percent if latest else None,
         "range_km": latest.range_km if latest else None,
         "speed_kph": latest.speed_kph if latest else None,
-        "last_poll": _iso(latest.observed_at) if latest else None,
-        "source_updated_at": _iso(latest.source_updated_at) if latest else None,
+        "last_poll": _local_iso(latest.observed_at, settings) if latest else None,
+        "source_updated_at": _local_iso(latest.source_updated_at, settings) if latest else None,
         "distance_7d_km": round(float(distance_7d or 0.0), 1),
-        "distance_30d_km": round(float(distance_30d or 0.0), 1),
+        "distance_30d_km": round(distance_30, 1),
+        "trip_count_30d": count,
+        "average_trip_30d_km": round(distance_30 / count, 1) if count else 0.0,
         "fuel_spend_30d": round(float(fuel_spend_30d or 0.0), 2),
+        "fuel_fill_count_30d": int(fuel_fill_count_30d or 0),
         "next_service_odometer_km": next_service,
         "service_remaining_km": service_remaining,
+        "vehicle_status": _snapshot_status(latest),
+        "last_trip": (
+            {
+                "started_at": _local_iso(latest_trip.started_at, settings),
+                "ended_at": _local_iso(latest_trip.ended_at, settings),
+                "distance_km": round(latest_trip.distance_km, 1),
+                "is_open": latest_trip.is_open,
+            }
+            if latest_trip
+            else None
+        ),
     }
 
 
@@ -100,8 +147,8 @@ def recent_trips(
     return [
         {
             "id": trip.id,
-            "started_at": _iso(trip.started_at),
-            "ended_at": _iso(trip.ended_at),
+            "started_at": _local_iso(trip.started_at, settings),
+            "ended_at": _local_iso(trip.ended_at, settings),
             "distance_km": round(trip.distance_km, 1),
             "is_open": trip.is_open,
         }
@@ -126,7 +173,7 @@ def recent_fuel_fills(
     return [
         {
             "id": fill.id,
-            "filled_at": _iso(fill.filled_at),
+            "filled_at": _local_iso(fill.filled_at, settings),
             "liters": fill.liters,
             "total_cost": fill.total_cost,
             "odometer_km": fill.odometer_km,
