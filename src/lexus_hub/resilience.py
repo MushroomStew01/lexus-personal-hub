@@ -12,10 +12,14 @@ from .storage import trip_diagnostics
 
 router = APIRouter(tags=["resilience"])
 
-_MAP_SCRIPT_TAG = (
-    '<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@6.3.0/dist/maplibre-gl.js"></script>'
-)
+_LOCAL_CSS_URL = "/vendor/maplibre-gl.css"
+_LOCAL_JS_URL = "/vendor/maplibre-gl.js"
 _FALLBACK_SCRIPT_TAG = '<script src="/map-fallback.js"></script>'
+
+# The original dashboard HTML still references the pre-vendoring MapLibre CDN
+# bundle. Rewrite either historical CDN version to the same-origin assets that
+# are already baked into the production Docker image.
+_CDN_VERSIONS = ("6.3.0", "5.24.0")
 
 
 @router.get("/api/trip-diagnostics")
@@ -277,7 +281,7 @@ def map_fallback_js() -> Response:
 
 
 class DashboardMapFallbackMiddleware(BaseHTTPMiddleware):
-    """Inject the same-origin map shim after the optional MapLibre CDN script."""
+    """Use vendored MapLibre on the home dashboard, with the SVG shim as backup."""
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
@@ -291,10 +295,20 @@ class DashboardMapFallbackMiddleware(BaseHTTPMiddleware):
         async for chunk in response.body_iterator:
             body += chunk
         text = body.decode("utf-8", errors="replace")
-        if _MAP_SCRIPT_TAG in text and _FALLBACK_SCRIPT_TAG not in text:
+
+        # Rewrite both the old 6.x references and the v5 browser-bundle CDN
+        # references to the local Docker-vendored copies. This keeps the home
+        # page on the exact same reliable asset path as /garage.
+        for version in _CDN_VERSIONS:
+            cdn_base = f"https://cdn.jsdelivr.net/npm/maplibre-gl@{version}/dist"
+            text = text.replace(f"{cdn_base}/maplibre-gl.css", _LOCAL_CSS_URL)
+            text = text.replace(f"{cdn_base}/maplibre-gl.js", _LOCAL_JS_URL)
+
+        local_script_tag = f'<script src="{_LOCAL_JS_URL}"></script>'
+        if local_script_tag in text and _FALLBACK_SCRIPT_TAG not in text:
             text = text.replace(
-                _MAP_SCRIPT_TAG,
-                _MAP_SCRIPT_TAG + "\n" + _FALLBACK_SCRIPT_TAG,
+                local_script_tag,
+                local_script_tag + "\n" + _FALLBACK_SCRIPT_TAG,
                 1,
             )
 
