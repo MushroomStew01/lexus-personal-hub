@@ -46,6 +46,7 @@ async def _test() -> None:
         "fuel_percent": reading.fuel_percent,
         "range_km": reading.range_km,
         "speed_kph": reading.speed_kph,
+        "status": reading.raw.get("status", {}),
     }
     print(json.dumps(output, indent=2, default=str))
 
