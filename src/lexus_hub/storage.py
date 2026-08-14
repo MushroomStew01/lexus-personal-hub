@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-"""Local persistence for the account owner's own vehicle telemetry.
+"""Local persistence for the account owner's own vehicle telemetry."""
 
-This module stores odometer/fuel/range/speed locally and derives trip distance from the owner's
-odometer history. It does not collect location data or expose data to third parties.
-"""
-
+import json
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -116,6 +113,7 @@ def save_snapshot(
         .order_by(Snapshot.observed_at.desc())
         .limit(1)
     )
+    raw_json = json.dumps(reading.raw, separators=(",", ":"), default=str) if reading.raw else None
     snapshot = Snapshot(
         vehicle_id=vehicle.id,
         observed_at=as_utc_naive(reading.observed_at) or utcnow(),
@@ -124,6 +122,9 @@ def save_snapshot(
         fuel_percent=reading.fuel_percent,
         range_km=reading.range_km,
         speed_kph=reading.speed_kph,
+        latitude=reading.latitude if settings.store_location else None,
+        longitude=reading.longitude if settings.store_location else None,
+        raw_json=raw_json,
     )
     session.add(snapshot)
     session.flush()

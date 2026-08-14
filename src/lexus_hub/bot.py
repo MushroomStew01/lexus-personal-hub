@@ -8,7 +8,28 @@ from discord import app_commands
 from .analytics import recent_trips, status_summary
 from .config import Settings
 from .db import init_db, session_scope
+from .poller import poll_once
 from .storage import add_fuel_fill, primary_vehicle
+
+_TIRE_LABELS = {
+    "front_driver_tire": "Front driver",
+    "front_passenger_tire": "Front passenger",
+    "rear_driver_tire": "Rear driver",
+    "rear_passenger_tire": "Rear passenger",
+}
+_SECURITY_LABELS = {
+    "front_driver_door": "Front driver door",
+    "front_passenger_door": "Front passenger door",
+    "rear_driver_door": "Rear driver door",
+    "rear_passenger_door": "Rear passenger door",
+    "front_driver_window": "Front driver window",
+    "front_passenger_window": "Front passenger window",
+    "rear_driver_window": "Rear driver window",
+    "rear_passenger_window": "Rear passenger window",
+    "moonroof": "Moonroof",
+    "hood": "Hood",
+    "trunk": "Trunk",
+}
 
 
 class LexusBot(discord.Client):
@@ -26,18 +47,72 @@ class LexusBot(discord.Client):
             await self.tree.sync()
 
 
-def _status_text(settings: Settings) -> str:
+def _status(settings: Settings) -> dict[str, object]:
     with session_scope() as session:
-        status = status_summary(session, settings)
+        return status_summary(session, settings)
+
+
+def _fmt(value: object, suffix: str = "") -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:,.1f}{suffix}"
+    return f"{value}{suffix}"
+
+
+def _record_value(status: dict[str, object], key: str) -> str:
+    vehicle_status = status.get("vehicle_status")
+    if not isinstance(vehicle_status, dict):
+        return "—"
+    record = vehicle_status.get(key)
+    if not isinstance(record, dict):
+        return "—"
+    return str(record.get("display") or record.get("value") or "—")
+
+
+def _status_embed(settings: Settings) -> discord.Embed:
+    status = _status(settings)
+    embed = discord.Embed(title=settings.vehicle_display_name, color=0xD4D4D4)
     if not status.get("ready"):
-        return "No saved vehicle data yet."
-    return (
-        f"**{settings.vehicle_display_name}**\n"
-        f"Odometer: {status.get('odometer_km') or '—'} km\n"
-        f"Fuel: {status.get('fuel_percent') or '—'}%\n"
-        f"Range: {status.get('range_km') or '—'} km\n"
-        f"Last 7 days: {status.get('distance_7d_km') or 0} km"
+        embed.description = "No saved vehicle data yet."
+        return embed
+
+    embed.add_field(name="Odometer", value=_fmt(status.get("odometer_km"), " km"), inline=True)
+    embed.add_field(name="Fuel", value=_fmt(status.get("fuel_percent"), "%"), inline=True)
+    embed.add_field(name="Range", value=_fmt(status.get("range_km"), " km"), inline=True)
+    embed.add_field(name="Speed", value=_fmt(status.get("speed_kph"), " km/h"), inline=True)
+    embed.add_field(
+        name="7-day distance",
+        value=_fmt(status.get("distance_7d_km"), " km"),
+        inline=True,
     )
+    embed.add_field(
+        name="30-day distance",
+        value=_fmt(status.get("distance_30d_km"), " km"),
+        inline=True,
+    )
+    last_poll = status.get("last_poll")
+    if last_poll:
+        embed.set_footer(text=f"Last saved snapshot: {last_poll}")
+    return embed
+
+
+def _tires_text(settings: Settings) -> str:
+    status = _status(settings)
+    lines = [
+        f"**{label}:** {_record_value(status, key)}"
+        for key, label in _TIRE_LABELS.items()
+    ]
+    return "\n".join(lines)
+
+
+def _doors_text(settings: Settings) -> str:
+    status = _status(settings)
+    lines = [
+        f"**{label}:** {_record_value(status, key)}"
+        for key, label in _SECURITY_LABELS.items()
+    ]
+    return "\n".join(lines)
 
 
 def run_bot(settings: Settings) -> None:
@@ -46,9 +121,27 @@ def run_bot(settings: Settings) -> None:
     init_db()
     bot = LexusBot(settings)
 
-    @bot.tree.command(name="car", description="Show the latest saved vehicle status")
+    @bot.tree.command(name="car", description="Show the latest saved Lexus status")
     async def car(interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(_status_text(settings), ephemeral=True)
+        await interaction.response.send_message(embed=_status_embed(settings), ephemeral=True)
+
+    @bot.tree.command(name="tires", description="Show current Lexus tire pressures")
+    async def tires(interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(_tires_text(settings), ephemeral=True)
+
+    @bot.tree.command(name="doors", description="Show saved door and window status")
+    async def doors(interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(_doors_text(settings), ephemeral=True)
+
+    @bot.tree.command(name="refresh", description="Read Home Assistant and save a fresh snapshot")
+    async def refresh(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await poll_once(settings)
+        except Exception as exc:
+            await interaction.followup.send(f"Refresh failed: {exc}", ephemeral=True)
+            return
+        await interaction.followup.send(embed=_status_embed(settings), ephemeral=True)
 
     @bot.tree.command(name="trips", description="Show the five most recent detected trips")
     async def trips(interaction: discord.Interaction) -> None:
