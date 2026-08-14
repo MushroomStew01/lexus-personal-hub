@@ -10,7 +10,8 @@ from lexus_hub.config import Settings
 from lexus_hub.db import Base
 from lexus_hub.models import Trip
 from lexus_hub.providers.base import VehicleReading
-from lexus_hub.resilience import DashboardMapFallbackMiddleware, router as resilience_router
+from lexus_hub.resilience import DashboardMapFallbackMiddleware
+from lexus_hub.resilience import router as resilience_router
 from lexus_hub.storage import save_snapshot, trip_diagnostics
 from lexus_hub.timeutil import utcnow
 
