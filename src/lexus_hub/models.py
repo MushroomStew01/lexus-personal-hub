@@ -29,6 +29,14 @@ class Vehicle(Base):
         back_populates="vehicle",
         cascade="all, delete-orphan",
     )
+    named_locations: Mapped[list[NamedLocation]] = relationship(
+        back_populates="vehicle",
+        cascade="all, delete-orphan",
+    )
+    maintenance_records: Mapped[list[MaintenanceRecord]] = relationship(
+        back_populates="vehicle",
+        cascade="all, delete-orphan",
+    )
 
 
 class Snapshot(Base):
@@ -102,6 +110,48 @@ class TripPoint(Base):
     odometer_km: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     trip: Mapped[Trip] = relationship(back_populates="points")
+
+
+class NamedLocation(Base):
+    __tablename__ = "named_locations"
+    __table_args__ = (Index("ix_named_location_vehicle_name", "vehicle_id", "name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="CASCADE"),
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    radius_m: Mapped[float] = mapped_column(Float, default=250.0)
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+    vehicle: Mapped[Vehicle] = relationship(back_populates="named_locations")
+
+
+class MaintenanceRecord(Base):
+    __tablename__ = "maintenance_records"
+    __table_args__ = (
+        Index("ix_maintenance_vehicle_performed", "vehicle_id", "performed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vehicle_id: Mapped[int] = mapped_column(
+        ForeignKey("vehicles.id", ondelete="CASCADE"),
+        index=True,
+    )
+    performed_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+    kind: Mapped[str] = mapped_column(String(80), index=True)
+    odometer_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_due_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    next_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow)
+
+    vehicle: Mapped[Vehicle] = relationship(back_populates="maintenance_records")
 
 
 class FuelFill(Base):
