@@ -52,3 +52,43 @@ def test_home_assistant_binary_lock_semantics():
     assert provider._binary_label("on", "lock") == "Unlocked"
     assert provider._binary_label("locked", "lock") == "Locked"
     assert provider._binary_label("unlocked", "lock") == "Unlocked"
+
+
+def test_home_assistant_location_coordinates():
+    provider = HAProvider(Settings(_env_file=None))
+    state = {
+        "entity_id": "device_tracker.lexus_current_location",
+        "state": "not_home",
+        "attributes": {"latitude": 43.4516, "longitude": -80.4925},
+    }
+    latitude, longitude = provider._coordinates(state)
+    assert latitude == pytest.approx(43.4516)
+    assert longitude == pytest.approx(-80.4925)
+
+
+def test_home_assistant_prefers_current_vehicle_location():
+    settings = Settings(_env_file=None, vehicle_display_name="2023 IS")
+    provider = HAProvider(settings)
+    states = [
+        {
+            "entity_id": "device_tracker.2023_is_last_parked_location",
+            "state": "not_home",
+            "attributes": {
+                "friendly_name": "2023 IS Last Parked Location",
+                "latitude": 43.4,
+                "longitude": -80.4,
+            },
+        },
+        {
+            "entity_id": "device_tracker.2023_is_current_location",
+            "state": "not_home",
+            "attributes": {
+                "friendly_name": "2023 IS Current Location",
+                "latitude": 43.5,
+                "longitude": -80.5,
+            },
+        },
+    ]
+    found = provider._location_state(states)
+    assert found is not None
+    assert found["entity_id"] == "device_tracker.2023_is_current_location"
