@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter
@@ -28,6 +29,7 @@ _CDN_JS = (
 _LOCAL_CSS = "/vendor/maplibre-gl.css"
 _LOCAL_JS = "/vendor/maplibre-gl.js"
 _FALLBACK_JS = "/map-fallback.js"
+_VENDOR_DIR = Path("/app/vendor")
 
 
 @lru_cache(maxsize=4)
@@ -35,7 +37,7 @@ def _download_asset(name: str) -> bytes:
     url = f"{_MAPLIBRE_BASE}/{name}"
     response = httpx.get(
         url,
-        timeout=20.0,
+        timeout=120.0,
         follow_redirects=True,
         headers={"User-Agent": "Lexus-Personal-Hub/0.3"},
     )
@@ -43,20 +45,47 @@ def _download_asset(name: str) -> bytes:
     return response.content
 
 
+def _read_vendored_asset(name: str) -> bytes | None:
+    path = _VENDOR_DIR / name
+    if not path.is_file():
+        return None
+    return path.read_bytes()
+
+
 def _asset_response(name: str, media_type: str) -> Response:
+    content = _read_vendored_asset(name)
+    if content is not None:
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "public, max-age=604800, immutable",
+                "X-Lexus-Asset-Source": "vendored",
+            },
+        )
+
+    # Development/source installs may not have the Docker-vendored assets.
+    # Keep a network fallback for those environments, but production Docker
+    # should normally serve from /app/vendor without any runtime CDN request.
     try:
         content = _download_asset(name)
         return Response(
             content=content,
             media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "X-Lexus-Asset-Source": "network-fallback",
+            },
         )
     except httpx.HTTPError as exc:
         return Response(
             content=f"/* MapLibre asset unavailable: {type(exc).__name__} */\n",
             status_code=502,
             media_type=media_type,
-            headers={"Cache-Control": "no-store"},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Lexus-Asset-Source": "unavailable",
+            },
         )
 
 
