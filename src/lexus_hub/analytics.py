@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
+from .insights import current_vehicle_location, trip_labels, trip_replay
 from .models import FuelFill, Snapshot, Trip, TripPoint
 from .storage import primary_vehicle
 from .timeutil import utcnow
@@ -93,6 +94,19 @@ def status_summary(session: Session, settings: Settings) -> dict[str, object]:
 
     count = int(trip_count_30d or 0)
     distance_30 = float(distance_30d or 0.0)
+    last_trip_payload = None
+    if latest_trip:
+        start_label, end_label = trip_labels(session, latest_trip)
+        last_trip_payload = {
+            "id": latest_trip.id,
+            "started_at": _local_iso(latest_trip.started_at, settings),
+            "ended_at": _local_iso(latest_trip.ended_at, settings),
+            "distance_km": round(latest_trip.distance_km, 1),
+            "is_open": latest_trip.is_open,
+            "start_label": start_label,
+            "end_label": end_label,
+        }
+
     return {
         "ready": latest is not None,
         "provider": vehicle.provider,
@@ -119,16 +133,8 @@ def status_summary(session: Session, settings: Settings) -> dict[str, object]:
         "vehicle_status": _snapshot_status(latest),
         "location_storage_enabled": settings.store_location,
         "trip_maps_enabled": settings.store_location and settings.show_exact_location,
-        "last_trip": (
-            {
-                "started_at": _local_iso(latest_trip.started_at, settings),
-                "ended_at": _local_iso(latest_trip.ended_at, settings),
-                "distance_km": round(latest_trip.distance_km, 1),
-                "is_open": latest_trip.is_open,
-            }
-            if latest_trip
-            else None
-        ),
+        "parking": current_vehicle_location(session, settings),
+        "last_trip": last_trip_payload,
     }
 
 
@@ -146,25 +152,30 @@ def recent_trips(
         .order_by(Trip.started_at.desc())
         .limit(limit)
     ).all()
-    return [
-        {
-            "id": trip.id,
-            "started_at": _local_iso(trip.started_at, settings),
-            "ended_at": _local_iso(trip.ended_at, settings),
-            "distance_km": round(trip.distance_km, 1),
-            "is_open": trip.is_open,
-            "has_route": bool(
-                len(trip.points) >= 2
-                or (
-                    trip.start_latitude is not None
-                    and trip.start_longitude is not None
-                    and trip.end_latitude is not None
-                    and trip.end_longitude is not None
-                )
-            ),
-        }
-        for trip in trips
-    ]
+    results: list[dict[str, object]] = []
+    for trip in trips:
+        start_label, end_label = trip_labels(session, trip)
+        results.append(
+            {
+                "id": trip.id,
+                "started_at": _local_iso(trip.started_at, settings),
+                "ended_at": _local_iso(trip.ended_at, settings),
+                "distance_km": round(trip.distance_km, 1),
+                "is_open": trip.is_open,
+                "start_label": start_label,
+                "end_label": end_label,
+                "has_route": bool(
+                    len(trip.points) >= 2
+                    or (
+                        trip.start_latitude is not None
+                        and trip.start_longitude is not None
+                        and trip.end_latitude is not None
+                        and trip.end_longitude is not None
+                    )
+                ),
+            }
+        )
+    return results
 
 
 def trip_route(
@@ -217,14 +228,19 @@ def trip_route(
             ):
                 coordinates.append(end_point)
 
+    start_label, end_label = trip_labels(session, trip)
+    replay = trip_replay(session, settings, trip.id)
     return {
         "id": trip.id,
         "started_at": _local_iso(trip.started_at, settings),
         "ended_at": _local_iso(trip.ended_at, settings),
         "distance_km": round(trip.distance_km, 1),
         "is_open": trip.is_open,
+        "start_label": start_label,
+        "end_label": end_label,
         "point_count": len(coordinates),
         "points": coordinates,
+        "replay": replay.get("points", []) if replay else [],
     }
 
 
