@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     timezone: str = "America/Toronto"
     dashboard_refresh_seconds: int = Field(default=60, ge=15, le=3600)
     dashboard_url: str | None = None
+    map_router_url: str = "https://router.project-osrm.org"
 
     provider: Literal["mock", "home_assistant"] = "mock"
     poll_interval_minutes: int = Field(default=15, ge=5, le=1440)
