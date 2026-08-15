@@ -5,7 +5,7 @@ from .garage_v2 import router as garage_router
 from .map_assets import MapAssetProxyMiddleware
 from .map_assets import router as map_assets_router
 from .mobile_app_v2 import GarageReturnLinkMiddleware
-from .mobile_app_v2 import router as mobile_app_v2_router
+from .mobile_app_v3 import router as mobile_app_v3_router
 from .mobile_enhancements import router as mobile_enhancements_router
 from .mobile_resilience import MobileResilienceMiddleware
 from .mobile_resilience import router as mobile_resilience_router
@@ -16,17 +16,17 @@ from .web import app
 
 app.include_router(garage_router)
 app.include_router(feature_router)
-# Register the redesigned /app before the legacy PWA shell so it wins route matching.
-app.include_router(mobile_app_v2_router)
-# Keep manifest, icons, service worker, and health-score resources from the PWA module.
+# Polished mobile shell owns /app. The PWA router still provides manifest/icons/service worker.
+app.include_router(mobile_app_v3_router)
 app.include_router(pwa_router)
 app.include_router(resilience_router)
 app.include_router(map_assets_router)
-# These routers still provide trip-details, address, access, and refresh APIs used by mobile v2.
+# Trip details, reverse-geocoding, connection routing, and refresh APIs used by the mobile shell.
 app.include_router(mobile_enhancements_router)
 app.include_router(mobile_resilience_router)
 app.add_middleware(DashboardMapFallbackMiddleware)
 app.add_middleware(MapAssetProxyMiddleware)
-# This injects cached connection targets for the offline PWA shell without changing the v2 layout.
+# Keep cached connection targets available when the installed PWA opens before APIs respond.
 app.add_middleware(MobileResilienceMiddleware)
+# Garage remains the full driving-intelligence page but returns to /app.
 app.add_middleware(GarageReturnLinkMiddleware)
