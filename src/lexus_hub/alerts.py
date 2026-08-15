@@ -88,11 +88,13 @@ def _snapshot_status(snapshot: Snapshot) -> dict[str, object]:
     return status if isinstance(status, dict) else {}
 
 
+def _record(status: dict[str, object], key: str) -> dict[str, object]:
+    value = status.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _record_value(status: dict[str, object], key: str) -> object:
-    record = status.get(key)
-    if not isinstance(record, dict):
-        return None
-    return record.get("value")
+    return _record(status, key).get("value")
 
 
 def _record_text(status: dict[str, object], key: str) -> str:
@@ -106,6 +108,30 @@ def _record_number(status: dict[str, object], key: str) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _record_updated_at(status: dict[str, object], key: str) -> datetime | None:
+    raw = _record(status, key).get("updated_at")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed
+
+
+def _fresh_after(
+    status: dict[str, object],
+    key: str,
+    cutoff: datetime | None,
+) -> bool:
+    if cutoff is None:
+        return True
+    updated_at = _record_updated_at(status, key)
+    return updated_at is not None and updated_at >= cutoff
 
 
 def _vehicle_is_parked(
@@ -122,6 +148,20 @@ def _vehicle_is_parked(
         .limit(1)
     )
     return open_trip is None
+
+
+def _latest_parked_cutoff(session: Session, vehicle: Vehicle) -> datetime | None:
+    latest = session.scalar(
+        select(Trip)
+        .where(
+            Trip.vehicle_id == vehicle.id,
+            Trip.is_open.is_(False),
+            Trip.ended_at.is_not(None),
+        )
+        .order_by(Trip.ended_at.desc())
+        .limit(1)
+    )
+    return latest.ended_at if latest is not None else None
 
 
 def pending_alerts(
@@ -164,11 +204,13 @@ def pending_alerts(
             )
 
     parked = _vehicle_is_parked(session, vehicle, snapshot, settings)
+    parked_cutoff = _latest_parked_cutoff(session, vehicle) if parked else None
+
     if parked and settings.alert_openings:
         open_items = [
             item_label
             for key, item_label in _OPENING_KEYS.items()
-            if _record_text(status, key) == "open"
+            if _record_text(status, key) == "open" and _fresh_after(status, key, parked_cutoff)
         ]
         if open_items and not _recently_sent(session, "parked_opening", timedelta(hours=2)):
             alerts.append(
@@ -182,7 +224,7 @@ def pending_alerts(
         unlocked = [
             item_label
             for key, item_label in _LOCK_KEYS.items()
-            if _record_text(status, key) == "unlocked"
+            if _record_text(status, key) == "unlocked" and _fresh_after(status, key, parked_cutoff)
         ]
         if unlocked and not _recently_sent(session, "parked_unlocked", timedelta(hours=2)):
             alerts.append(
