@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     ha_location_entity: str | None = None
     ha_speed_entity: str | None = None
     ha_last_update_entity: str | None = None
+    ha_refresh_button_entity: str | None = None
+    ha_refresh_settle_seconds: int = Field(default=15, ge=0, le=120)
+    post_stop_refresh_enabled: bool = False
+    post_stop_refresh_delay_seconds: int = Field(default=30, ge=0, le=600)
 
     discord_webhook_url: str | None = None
     discord_bot_token: str | None = None
