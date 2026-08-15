@@ -9,7 +9,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .config import get_settings
+from .config import Settings, get_settings
 from .db import init_db, session_scope
 from .insights import location_label
 from .models import Snapshot, Trip
@@ -29,6 +29,13 @@ def _safe_origin(url: str | None) -> str | None:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _host_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    return parsed.hostname.lower() if parsed.hostname else None
+
+
 def _address_from_geoapify(payload: object) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -38,14 +45,15 @@ def _address_from_geoapify(payload: object) -> str | None:
     first = results[0]
     if not isinstance(first, dict):
         return None
-    for key in ("formatted", "address_line1"):
-        value = first.get(key)
-        if isinstance(value, str) and value.strip():
-            if key == "address_line1":
-                line2 = first.get("address_line2")
-                if isinstance(line2, str) and line2.strip():
-                    return f"{value.strip()}, {line2.strip()}"
-            return value.strip()
+    formatted = first.get("formatted")
+    if isinstance(formatted, str) and formatted.strip():
+        return formatted.strip()
+    line1 = first.get("address_line1")
+    line2 = first.get("address_line2")
+    if isinstance(line1, str) and line1.strip():
+        if isinstance(line2, str) and line2.strip():
+            return f"{line1.strip()}, {line2.strip()}"
+        return line1.strip()
     return None
 
 
@@ -75,12 +83,15 @@ def _reverse_geocode_geoapify(
         return None
 
 
-def _estimated_address(latitude: float | None, longitude: float | None) -> str | None:
-    settings = get_settings()
+def _estimated_address(
+    settings: Settings,
+    latitude: float | None,
+    longitude: float | None,
+) -> str | None:
     if latitude is None or longitude is None or not settings.geoapify_api_key:
         return None
-    # About 11 m of latitude precision. This keeps repeated parking samples from
-    # generating needless reverse-geocoding requests while preserving useful addresses.
+    # Roughly 11 m of latitude precision. This keeps repeated parking samples
+    # from creating needless reverse-geocoding requests.
     return _reverse_geocode_geoapify(
         round(float(latitude), 4),
         round(float(longitude), 4),
@@ -88,23 +99,11 @@ def _estimated_address(latitude: float | None, longitude: float | None) -> str |
     )
 
 
-def _trip_snapshots(vehicle_id: int, trip: Trip) -> list[Snapshot]:
-    replay_end = trip.ended_at or trip.last_movement_at
-    with session_scope() as session:
-        return list(
-            session.scalars(
-                select(Snapshot)
-                .where(
-                    Snapshot.vehicle_id == vehicle_id,
-                    Snapshot.observed_at >= trip.started_at,
-                    Snapshot.observed_at <= replay_end,
-                )
-                .order_by(Snapshot.observed_at.asc())
-            ).all()
-        )
-
-
-def _trip_metrics(snapshots: list[Snapshot], trip: Trip) -> dict[str, object]:
+def _trip_metrics(
+    snapshots: list[Snapshot],
+    trip: Trip,
+    settings: Settings,
+) -> dict[str, object]:
     duration_seconds = max(
         0.0,
         ((trip.ended_at or trip.last_movement_at) - trip.started_at).total_seconds(),
@@ -127,8 +126,6 @@ def _trip_metrics(snapshots: list[Snapshot], trip: Trip) -> dict[str, object]:
         if fuel_start is not None and fuel_end is not None
         else None
     )
-
-    settings = get_settings()
     fuel_used_liters = None
     if fuel_drop is not None and settings.fuel_tank_capacity_liters is not None:
         fuel_used_liters = round(settings.fuel_tank_capacity_liters * fuel_drop / 100.0, 2)
@@ -167,6 +164,19 @@ def api_trip_details(trip_id: int) -> dict[str, object]:
         )
         if trip is None:
             raise HTTPException(status_code=404, detail="Trip not found.")
+
+        replay_end = trip.ended_at or trip.last_movement_at
+        snapshots = list(
+            session.scalars(
+                select(Snapshot)
+                .where(
+                    Snapshot.vehicle_id == vehicle.id,
+                    Snapshot.observed_at >= trip.started_at,
+                    Snapshot.observed_at <= replay_end,
+                )
+                .order_by(Snapshot.observed_at.asc())
+            ).all()
+        )
         start_label = location_label(
             session,
             vehicle.id,
@@ -183,37 +193,29 @@ def api_trip_details(trip_id: int) -> dict[str, object]:
             reveal_private_name=False,
             reveal_coordinates=False,
         )
-        vehicle_id = vehicle.id
+        metrics = _trip_metrics(snapshots, trip, settings)
         start_latitude = trip.start_latitude
         start_longitude = trip.start_longitude
         end_latitude = trip.end_latitude
         end_longitude = trip.end_longitude
-        trip_copy = Trip(
-            id=trip.id,
-            vehicle_id=trip.vehicle_id,
-            started_at=trip.started_at,
-            ended_at=trip.ended_at,
-            last_movement_at=trip.last_movement_at,
-            start_odometer_km=trip.start_odometer_km,
-            end_odometer_km=trip.end_odometer_km,
-            distance_km=trip.distance_km,
-            start_latitude=trip.start_latitude,
-            start_longitude=trip.start_longitude,
-            end_latitude=trip.end_latitude,
-            end_longitude=trip.end_longitude,
-            is_open=trip.is_open,
-        )
 
-    snapshots = _trip_snapshots(vehicle_id, trip_copy)
-    start_address = None if start_label != "Unnamed location" else _estimated_address(start_latitude, start_longitude)
-    end_address = None if end_label != "Unnamed location" else _estimated_address(end_latitude, end_longitude)
+    start_address = (
+        _estimated_address(settings, start_latitude, start_longitude)
+        if start_label == "Unnamed location"
+        else None
+    )
+    end_address = (
+        _estimated_address(settings, end_latitude, end_longitude)
+        if end_label == "Unnamed location"
+        else None
+    )
     return {
         "id": trip_id,
         "start_label": start_label,
         "end_label": end_label,
         "start_address": start_address,
         "end_address": end_address,
-        "metrics": _trip_metrics(snapshots, trip_copy),
+        "metrics": metrics,
     }
 
 
@@ -245,12 +247,14 @@ def api_current_address() -> dict[str, object]:
         longitude = latest.longitude
         speed = latest.speed_kph
 
-    # Never send a named/private location to an external reverse-geocoder. Only
-    # estimate an address for an otherwise unnamed parked location.
-    address = None
+    # Do not submit coordinates for named/private locations. Reverse-geocoding
+    # is only used for an otherwise unnamed parked location.
     parked = speed is None or speed <= settings.parking_speed_threshold_kph
-    if label == "Unnamed location" and parked:
-        address = _estimated_address(latitude, longitude)
+    address = (
+        _estimated_address(settings, latitude, longitude)
+        if label == "Unnamed location" and parked
+        else None
+    )
     return {
         "ready": True,
         "label": label,
@@ -262,14 +266,26 @@ def api_current_address() -> dict[str, object]:
 @router.get("/api/access")
 def api_access(request: Request) -> dict[str, object]:
     settings = get_settings()
-    current_origin = f"{request.url.scheme}://{request.url.netloc}"
+    host_header = request.headers.get("host", "")
+    current_host = host_header.rsplit(":", 1)[0].strip("[]").lower()
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    current_scheme = forwarded_proto.split(",", 1)[0].strip() if forwarded_proto else request.url.scheme
+    current_origin = f"{current_scheme}://{host_header}" if host_header else str(request.base_url).rstrip("/")
+    local_host = _host_from_url(settings.local_dashboard_url)
+    remote_host = _host_from_url(settings.dashboard_url)
+    if current_host and local_host and current_host == local_host:
+        mode = "local"
+    elif current_host and remote_host and current_host == remote_host:
+        mode = "private_remote"
+    else:
+        mode = "private_remote"
     return {
         "current_origin": current_origin,
         "local_url": settings.local_dashboard_url,
         "remote_url": settings.dashboard_url,
         "local_origin": _safe_origin(settings.local_dashboard_url),
         "remote_origin": _safe_origin(settings.dashboard_url),
-        "mode": "local" if current_origin == _safe_origin(settings.local_dashboard_url) else "private_remote",
+        "mode": mode,
         "automatic_local_switch": False,
         "note": "iOS secure PWAs cannot reliably probe an HTTP LAN origin from an HTTPS app; use the Local button or split-DNS/local HTTPS for transparent switching.",
     }
@@ -300,6 +316,7 @@ def mobile_enhancements_js() -> Response:
   document.head.appendChild(style);
 
   const fmt = (value, suffix='') => value === null || value === undefined ? '—' : `${value}${suffix}`;
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
   async function enhanceLocation() {
     try {
@@ -312,12 +329,22 @@ def mobile_enhancements_js() -> Response:
     } catch (_) {}
   }
 
+  async function tripRows() {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const rows = [...document.querySelectorAll('#trips .trip')];
+      if (rows.length) return rows;
+      await sleep(250);
+    }
+    return [];
+  }
+
   async function enhanceTrips() {
     try {
-      const trips = await getJSON('/api/trips?limit=4');
-      const rows = [...document.querySelectorAll('#trips .trip')];
+      const [trips, rows] = await Promise.all([getJSON('/api/trips?limit=4'), tripRows()]);
+      document.querySelector('#trip-telemetry-note')?.remove();
       await Promise.all(trips.slice(0, rows.length).map(async (trip, index) => {
         const row = rows[index];
+        if (row.querySelector('.trip-stats')) return;
         const details = await getJSON(`/api/trips/${trip.id}/details`);
         const route = row.querySelector('.trip-route');
         if (route) {
@@ -350,6 +377,7 @@ def mobile_enhancements_js() -> Response:
       }));
       if (rows.length) {
         const note = document.createElement('div');
+        note.id = 'trip-telemetry-note';
         note.className = 'safe-note';
         note.textContent = '* Top speed is the highest saved telemetry sample, so a brief peak between polls may be missed.';
         document.querySelector('#trips')?.appendChild(note);
@@ -358,11 +386,13 @@ def mobile_enhancements_js() -> Response:
   }
 
   async function enhanceAccess() {
+    if (document.querySelector('#connection-card')) return;
     try {
       const access = await getJSON('/api/access');
       const grid = document.querySelector('section.grid');
       if (!grid) return;
       const card = document.createElement('article');
+      card.id = 'connection-card';
       card.className = 'card';
       const heading = document.createElement('h2');
       heading.textContent = 'Connection';
@@ -390,15 +420,14 @@ def mobile_enhancements_js() -> Response:
       if (actions.children.length) card.appendChild(actions);
       const note = document.createElement('div');
       note.className = 'safe-note';
-      note.textContent = 'Transparent LAN switching needs split-DNS/local HTTPS. The buttons let you choose the path without changing app data.';
+      note.textContent = 'Transparent LAN switching needs split-DNS/local HTTPS. These buttons let you choose the path without changing app data.';
       card.appendChild(note);
       grid.appendChild(card);
     } catch (_) {}
   }
 
   async function run() {
-    // Let the base PWA populate its cards first.
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await sleep(400);
     await Promise.all([enhanceLocation(), enhanceTrips(), enhanceAccess()]);
   }
 
@@ -407,9 +436,17 @@ def mobile_enhancements_js() -> Response:
   } else {
     run();
   }
+  setInterval(() => {
+    enhanceLocation();
+    enhanceTrips();
+  }, 65000);
 })();
 """.strip()
-    return Response(content=script, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+    return Response(
+        content=script,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 class MobileEnhancementMiddleware(BaseHTTPMiddleware):
