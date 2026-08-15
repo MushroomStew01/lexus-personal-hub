@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     timezone: str = "America/Toronto"
     dashboard_refresh_seconds: int = Field(default=60, ge=15, le=3600)
     dashboard_url: str | None = None
+    local_dashboard_url: str | None = None
     map_router_url: str = "https://router.project-osrm.org"
+    geoapify_api_key: str | None = None
 
     provider: Literal["mock", "home_assistant"] = "mock"
     poll_interval_minutes: int = Field(default=15, ge=5, le=1440)
@@ -37,6 +39,7 @@ class Settings(BaseSettings):
     vehicle_display_name: str = "My Lexus"
     last_service_odometer_km: float | None = None
     service_interval_km: float = Field(default=8000, gt=0)
+    fuel_tank_capacity_liters: float | None = Field(default=None, gt=0, le=200)
     low_fuel_percent: float = Field(default=20, ge=0, le=100)
     low_range_km: float = Field(default=80, ge=0)
     low_tire_psi: float = Field(default=30, ge=0, le=100)
