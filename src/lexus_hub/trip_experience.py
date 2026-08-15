@@ -39,7 +39,7 @@ _MOBILE_PATCH = r"""
 (()=>{
   const qsa=(selector,root=document)=>[...root.querySelectorAll(selector)];
   const rasterStyle={version:8,sources:{osm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'© OpenStreetMap contributors'}},layers:[{id:'osm',type:'raster',source:'osm'}]};
-  let applying=false,tripListCache=null,parkingMap=null,parkingMarker=null;
+  let applying=false,tripListCache=null,parkingMap=null,parkingMarker=null,parkingMapLoading=false;
   const replayStates=new WeakMap();
 
   const getJSON=async url=>{const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw new Error(await r.text());return r.json()};
@@ -188,18 +188,25 @@ _MOBILE_PATCH = r"""
   }
 
   async function renderParkingMap(){
-    const target=document.querySelector('#where-main');if(!target||parkingMap)return;
-    const card=target.closest('.card');if(!card||card.querySelector('.parking-map-inline'))return;
+    const target=document.querySelector('#where-main');if(!target||parkingMap||parkingMapLoading)return;
+    const card=target.closest('.card');if(!card)return;
+    if(card.querySelector('#lexus-parking-map'))return;
+    parkingMapLoading=true;
     try{
       const data=await getJSON('/api/location/parking-point');
       if(!data.ready||!Number.isFinite(Number(data.latitude))||!Number.isFinite(Number(data.longitude))||typeof maplibregl==='undefined')return;
       if(data.address)target.textContent=data.address;
-      const box=document.createElement('div');box.className='parking-map-inline';box.setAttribute('aria-label','Parked vehicle map');card.appendChild(box);
-      const note=document.createElement('div');note.className='parking-map-note';note.textContent='Last saved Lexus parking position.';card.appendChild(note);
+      const box=document.createElement('div');box.id='lexus-parking-map';box.className='parking-map-inline';box.setAttribute('aria-label','Parked vehicle map');card.appendChild(box);
+      const note=document.createElement('div');note.id='lexus-parking-map-note';note.className='parking-map-note';note.textContent='Last saved Lexus parking position.';card.appendChild(note);
       const center=[Number(data.longitude),Number(data.latitude)];
       parkingMap=new maplibregl.Map({container:box,style:rasterStyle,center,zoom:15.5,minZoom:2,maxZoom:19});parkingMap.addControl(new maplibregl.NavigationControl(),'top-right');
       parkingMarker=new maplibregl.Marker({color:'#79c6ff'}).setLngLat(center).addTo(parkingMap);
-    }catch(_){ }
+    }catch(_){
+      document.querySelector('#lexus-parking-map')?.remove();
+      document.querySelector('#lexus-parking-map-note')?.remove();
+    }finally{
+      parkingMapLoading=false;
+    }
   }
 
   const apply=()=>{
