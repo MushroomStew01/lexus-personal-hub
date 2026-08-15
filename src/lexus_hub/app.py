@@ -12,6 +12,7 @@ from .mobile_resilience import router as mobile_resilience_router
 from .pwa import router as pwa_router
 from .resilience import DashboardMapFallbackMiddleware
 from .resilience import router as resilience_router
+from .stability import StabilityMiddleware
 from .web import app
 
 app.include_router(garage_router)
@@ -30,3 +31,5 @@ app.add_middleware(MapAssetProxyMiddleware)
 app.add_middleware(MobileResilienceMiddleware)
 # Garage remains the full driving-intelligence page but returns to /app.
 app.add_middleware(GarageReturnLinkMiddleware)
+# Presentation-only hardening for iOS, timestamps, icons, and fixed-navigation overlap.
+app.add_middleware(StabilityMiddleware)
