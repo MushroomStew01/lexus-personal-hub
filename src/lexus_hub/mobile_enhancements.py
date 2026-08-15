@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from functools import lru_cache
+from math import asin, cos, radians, sin, sqrt
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import Settings, get_settings
 from .db import init_db, session_scope
-from .insights import location_label
 from .models import Snapshot, Trip
 from .storage import primary_vehicle
 
@@ -36,6 +38,13 @@ def _host_from_url(url: str | None) -> str | None:
     return parsed.hostname.lower() if parsed.hostname else None
 
 
+def _local_iso(value: datetime | None, settings: Settings) -> str | None:
+    if value is None:
+        return None
+    source = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    return source.astimezone(ZoneInfo(settings.timezone)).isoformat()
+
+
 def _address_from_geoapify(payload: object) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -57,7 +66,7 @@ def _address_from_geoapify(payload: object) -> str | None:
     return None
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=1024)
 def _reverse_geocode_geoapify(
     latitude_rounded: float,
     longitude_rounded: float,
@@ -90,8 +99,9 @@ def _estimated_address(
 ) -> str | None:
     if latitude is None or longitude is None or not settings.geoapify_api_key:
         return None
-    # Roughly 11 m of latitude precision. This keeps repeated parking samples
-    # from creating needless reverse-geocoding requests.
+    # Roughly 11 m precision. Accurate enough to identify the physical parking
+    # address without generating a new reverse-geocoding request for every tiny
+    # GPS jitter while the vehicle is stationary.
     return _reverse_geocode_geoapify(
         round(float(latitude), 4),
         round(float(longitude), 4),
@@ -99,24 +109,65 @@ def _estimated_address(
     )
 
 
+def _haversine_km(a: Snapshot, b: Snapshot) -> float | None:
+    if a.latitude is None or a.longitude is None or b.latitude is None or b.longitude is None:
+        return None
+    radius_km = 6371.0088
+    lat1 = radians(float(a.latitude))
+    lat2 = radians(float(b.latitude))
+    d_lat = lat2 - lat1
+    d_lon = radians(float(b.longitude) - float(a.longitude))
+    h = sin(d_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(d_lon / 2) ** 2
+    return radius_km * 2 * asin(min(1.0, sqrt(h)))
+
+
+def _segment_speed_estimates(snapshots: list[Snapshot]) -> list[float]:
+    estimates: list[float] = []
+    for previous, current in zip(snapshots, snapshots[1:], strict=False):
+        seconds = (current.observed_at - previous.observed_at).total_seconds()
+        if seconds <= 0:
+            continue
+        hours = seconds / 3600.0
+        distance_km: float | None = None
+        if previous.odometer_km is not None and current.odometer_km is not None:
+            delta = float(current.odometer_km) - float(previous.odometer_km)
+            if 0 < delta <= 50:
+                distance_km = delta
+        if distance_km is None:
+            distance_km = _haversine_km(previous, current)
+        if distance_km is None or distance_km <= 0:
+            continue
+        estimate = distance_km / hours
+        # Reject impossible cloud/GPS jumps. The IS cannot legitimately produce
+        # a road-speed segment anywhere near this threshold.
+        if 0 < estimate <= 250:
+            estimates.append(estimate)
+    return estimates
+
+
 def _trip_metrics(
     snapshots: list[Snapshot],
     trip: Trip,
     settings: Settings,
 ) -> dict[str, object]:
-    duration_seconds = max(
-        0.0,
-        ((trip.ended_at or trip.last_movement_at) - trip.started_at).total_seconds(),
-    )
+    effective_end = trip.ended_at or trip.last_movement_at
+    duration_seconds = max(0.0, (effective_end - trip.started_at).total_seconds())
     duration_minutes = round(duration_seconds / 60.0)
 
-    speeds = [float(row.speed_kph) for row in snapshots if row.speed_kph is not None]
-    top_speed = round(max(speeds), 1) if speeds else None
+    speeds = [
+        float(row.speed_kph)
+        for row in snapshots
+        if row.speed_kph is not None and 0 <= float(row.speed_kph) <= 250
+    ]
+    sampled_peak = max(speeds) if speeds else None
     average_speed = (
-        round(float(trip.distance_km) / (duration_seconds / 3600.0), 1)
+        float(trip.distance_km) / (duration_seconds / 3600.0)
         if duration_seconds > 0 and trip.distance_km > 0
         else None
     )
+    segment_estimates = _segment_speed_estimates(snapshots)
+    peak_candidates = [value for value in [sampled_peak, average_speed, *segment_estimates] if value]
+    peak_estimate = max(peak_candidates) if peak_candidates else None
 
     fuels = [float(row.fuel_percent) for row in snapshots if row.fuel_percent is not None]
     fuel_start = fuels[0] if fuels else None
@@ -136,8 +187,12 @@ def _trip_metrics(
 
     return {
         "duration_minutes": duration_minutes,
-        "top_speed_kph": top_speed,
-        "average_speed_kph": average_speed,
+        # Keep the established field for the current UI, but it is now a robust
+        # lower-bound estimate using samples + odometer/GPS segment averages.
+        "top_speed_kph": round(peak_estimate, 1) if peak_estimate is not None else None,
+        "peak_speed_estimate_kph": round(peak_estimate, 1) if peak_estimate is not None else None,
+        "sampled_top_speed_kph": round(sampled_peak, 1) if sampled_peak is not None else None,
+        "average_speed_kph": round(average_speed, 1) if average_speed is not None else None,
         "fuel_start_percent": fuel_start,
         "fuel_end_percent": fuel_end,
         "fuel_drop_percent": fuel_drop,
@@ -147,7 +202,10 @@ def _trip_metrics(
         "start_odometer_km": round(float(trip.start_odometer_km), 1),
         "end_odometer_km": round(float(trip.end_odometer_km), 1),
         "telemetry_samples": len(snapshots),
-        "speed_note": "Top speed is the highest saved telemetry sample, not guaranteed trip maximum.",
+        "speed_note": (
+            "Peak speed is estimated from saved speed samples and telemetry-segment averages; "
+            "a brief peak between vehicle updates can still be missed."
+        ),
     }
 
 
@@ -177,42 +235,20 @@ def api_trip_details(trip_id: int) -> dict[str, object]:
                 .order_by(Snapshot.observed_at.asc())
             ).all()
         )
-        start_label = location_label(
-            session,
-            vehicle.id,
-            trip.start_latitude,
-            trip.start_longitude,
-            reveal_private_name=False,
-            reveal_coordinates=False,
-        )
-        end_label = location_label(
-            session,
-            vehicle.id,
-            trip.end_latitude,
-            trip.end_longitude,
-            reveal_private_name=False,
-            reveal_coordinates=False,
-        )
         metrics = _trip_metrics(snapshots, trip, settings)
         start_latitude = trip.start_latitude
         start_longitude = trip.start_longitude
         end_latitude = trip.end_latitude
         end_longitude = trip.end_longitude
 
-    start_address = (
-        _estimated_address(settings, start_latitude, start_longitude)
-        if start_label == "Unnamed location"
-        else None
-    )
-    end_address = (
-        _estimated_address(settings, end_latitude, end_longitude)
-        if end_label == "Unnamed location"
-        else None
-    )
+    # Saved Home/Work aliases are intentionally not used for the mobile app.
+    # Every trip is described by its physical reverse-geocoded location.
+    start_address = _estimated_address(settings, start_latitude, start_longitude)
+    end_address = _estimated_address(settings, end_latitude, end_longitude)
     return {
         "id": trip_id,
-        "start_label": start_label,
-        "end_label": end_label,
+        "start_label": start_address or "Unknown location",
+        "end_label": end_address or "Unknown location",
         "start_address": start_address,
         "end_address": end_address,
         "metrics": metrics,
@@ -235,32 +271,83 @@ def api_current_address() -> dict[str, object]:
         )
         if latest is None:
             return {"ready": False}
-        label = location_label(
-            session,
-            vehicle.id,
-            latest.latitude,
-            latest.longitude,
-            reveal_private_name=False,
-            reveal_coordinates=False,
-        )
         latitude = latest.latitude
         longitude = latest.longitude
         speed = latest.speed_kph
 
-    # Do not submit coordinates for named/private locations. Reverse-geocoding
-    # is only used for an otherwise unnamed parked location.
     parked = speed is None or speed <= settings.parking_speed_threshold_kph
-    address = (
-        _estimated_address(settings, latitude, longitude)
-        if label == "Unnamed location" and parked
-        else None
-    )
+    address = _estimated_address(settings, latitude, longitude) if parked else None
     return {
         "ready": True,
-        "label": label,
+        "label": address or ("Physical address unavailable" if parked else "Vehicle moving"),
         "estimated_address": address,
+        "parked": parked,
         "geocoder_configured": bool(settings.geoapify_api_key),
     }
+
+
+@router.get("/api/timeline/physical")
+def api_physical_timeline(limit: int = Query(default=20, ge=1, le=50)) -> list[dict[str, object]]:
+    settings = get_settings()
+    init_db()
+    with session_scope() as session:
+        vehicle = primary_vehicle(session, settings)
+        if vehicle is None:
+            return []
+        trips = list(
+            session.scalars(
+                select(Trip)
+                .where(Trip.vehicle_id == vehicle.id)
+                .order_by(Trip.started_at.desc())
+                .limit(max(6, min(limit, 20)))
+            ).all()
+        )
+        rows = [
+            {
+                "started_at": trip.started_at,
+                "ended_at": trip.ended_at,
+                "distance_km": trip.distance_km,
+                "start_latitude": trip.start_latitude,
+                "start_longitude": trip.start_longitude,
+                "end_latitude": trip.end_latitude,
+                "end_longitude": trip.end_longitude,
+            }
+            for trip in trips
+        ]
+
+    events: list[dict[str, object]] = []
+    for row in rows:
+        start_address = _estimated_address(
+            settings,
+            row["start_latitude"],
+            row["start_longitude"],
+        ) or "Unknown location"
+        events.append(
+            {
+                "type": "trip_start",
+                "text": f"Trip started from {start_address}",
+                "at": _local_iso(row["started_at"], settings),
+            }
+        )
+        if row["ended_at"] is not None:
+            end_address = _estimated_address(
+                settings,
+                row["end_latitude"],
+                row["end_longitude"],
+            ) or "Unknown location"
+            events.append(
+                {
+                    "type": "trip_end",
+                    "text": f"Trip completed at {end_address} · {float(row['distance_km']):.1f} km",
+                    "at": _local_iso(row["ended_at"], settings),
+                }
+            )
+
+    def sort_key(item: dict[str, object]) -> str:
+        return str(item.get("at") or "")
+
+    events.sort(key=sort_key, reverse=True)
+    return events[:limit]
 
 
 @router.get("/api/access")
@@ -269,8 +356,14 @@ def api_access(request: Request) -> dict[str, object]:
     host_header = request.headers.get("host", "")
     current_host = host_header.rsplit(":", 1)[0].strip("[]").lower()
     forwarded_proto = request.headers.get("x-forwarded-proto")
-    current_scheme = forwarded_proto.split(",", 1)[0].strip() if forwarded_proto else request.url.scheme
-    current_origin = f"{current_scheme}://{host_header}" if host_header else str(request.base_url).rstrip("/")
+    current_scheme = (
+        forwarded_proto.split(",", 1)[0].strip() if forwarded_proto else request.url.scheme
+    )
+    current_origin = (
+        f"{current_scheme}://{host_header}"
+        if host_header
+        else str(request.base_url).rstrip("/")
+    )
     local_host = _host_from_url(settings.local_dashboard_url)
     remote_host = _host_from_url(settings.dashboard_url)
     if current_host and local_host and current_host == local_host:
@@ -287,172 +380,31 @@ def api_access(request: Request) -> dict[str, object]:
         "remote_origin": _safe_origin(settings.dashboard_url),
         "mode": mode,
         "automatic_local_switch": False,
-        "note": "iOS secure PWAs cannot reliably probe an HTTP LAN origin from an HTTPS app; use the Local button or split-DNS/local HTTPS for transparent switching.",
+        "note": (
+            "iOS secure PWAs cannot reliably probe an HTTP LAN origin from an HTTPS app; "
+            "use the Local button or split-DNS/local HTTPS for transparent switching."
+        ),
     }
 
 
 @router.get("/mobile-enhancements.js", include_in_schema=False)
 def mobile_enhancements_js() -> Response:
-    script = r"""
-(() => {
-  const getJSON = async url => {
-    const response = await fetch(url, {cache: 'no-store'});
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
-  };
-
-  const style = document.createElement('style');
-  style.textContent = `
-    .trip-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
-    .trip-stat{background:#0d141b;border:1px solid #283442;border-radius:10px;padding:8px}
-    .trip-stat span{display:block;color:#8ea0b2;font-size:.62rem;text-transform:uppercase;letter-spacing:.05em}
-    .trip-stat strong{display:block;margin-top:3px;font-size:.78rem}
-    .connection-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    .connection-actions a{display:inline-block;border:1px solid #38516a;background:#162535;color:#a9d8ff;
-      border-radius:10px;padding:8px 10px;text-decoration:none;font-size:.78rem}
-    .safe-note{color:#8ea0b2;font-size:.7rem;line-height:1.4;margin-top:8px}
-    @media(max-width:420px){.trip-stats{grid-template-columns:repeat(2,1fr)}}
-  `;
-  document.head.appendChild(style);
-
-  const fmt = (value, suffix='') => value === null || value === undefined ? '—' : `${value}${suffix}`;
-  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-  async function enhanceLocation() {
-    try {
-      const data = await getJSON('/api/location/address');
-      if (!data.ready || !data.estimated_address) return;
-      const main = document.querySelector('#where-main');
-      if (main && ['Unnamed location', 'Unknown location'].includes(main.textContent.trim())) {
-        main.textContent = data.estimated_address;
-      }
-    } catch (_) {}
-  }
-
-  async function tripRows() {
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      const rows = [...document.querySelectorAll('#trips .trip')];
-      if (rows.length) return rows;
-      await sleep(250);
-    }
-    return [];
-  }
-
-  async function enhanceTrips() {
-    try {
-      const [trips, rows] = await Promise.all([getJSON('/api/trips?limit=4'), tripRows()]);
-      document.querySelector('#trip-telemetry-note')?.remove();
-      await Promise.all(trips.slice(0, rows.length).map(async (trip, index) => {
-        const row = rows[index];
-        if (row.querySelector('.trip-stats')) return;
-        const details = await getJSON(`/api/trips/${trip.id}/details`);
-        const route = row.querySelector('.trip-route');
-        if (route) {
-          const start = details.start_address || details.start_label || trip.start_label || 'Start';
-          const end = details.end_address || details.end_label || trip.end_label || 'End';
-          route.textContent = `${start} → ${end}`;
-        }
-        const metrics = details.metrics || {};
-        const stats = document.createElement('div');
-        stats.className = 'trip-stats';
-        const items = [
-          ['Duration', fmt(metrics.duration_minutes, ' min')],
-          ['Top speed*', fmt(metrics.top_speed_kph, ' km/h')],
-          ['Avg speed', fmt(metrics.average_speed_kph, ' km/h')],
-          ['Fuel drop', fmt(metrics.fuel_drop_percent, '%')],
-          ['Fuel used', metrics.fuel_used_liters_estimate == null ? 'Set tank size' : fmt(metrics.fuel_used_liters_estimate, ' L')],
-          ['Samples', fmt(metrics.telemetry_samples)],
-        ];
-        items.forEach(([label, value]) => {
-          const item = document.createElement('div');
-          item.className = 'trip-stat';
-          const name = document.createElement('span');
-          name.textContent = label;
-          const val = document.createElement('strong');
-          val.textContent = value;
-          item.append(name, val);
-          stats.appendChild(item);
-        });
-        row.appendChild(stats);
-      }));
-      if (rows.length) {
-        const note = document.createElement('div');
-        note.id = 'trip-telemetry-note';
-        note.className = 'safe-note';
-        note.textContent = '* Top speed is the highest saved telemetry sample, so a brief peak between polls may be missed.';
-        document.querySelector('#trips')?.appendChild(note);
-      }
-    } catch (_) {}
-  }
-
-  async function enhanceAccess() {
-    if (document.querySelector('#connection-card')) return;
-    try {
-      const access = await getJSON('/api/access');
-      const grid = document.querySelector('section.grid');
-      if (!grid) return;
-      const card = document.createElement('article');
-      card.id = 'connection-card';
-      card.className = 'card';
-      const heading = document.createElement('h2');
-      heading.textContent = 'Connection';
-      const main = document.createElement('div');
-      main.className = 'where-main';
-      main.textContent = access.mode === 'local' ? 'Home LAN' : 'Tailscale / private';
-      const detail = document.createElement('div');
-      detail.className = 'sub';
-      detail.textContent = access.current_origin || 'Current connection';
-      card.append(heading, main, detail);
-      const actions = document.createElement('div');
-      actions.className = 'connection-actions';
-      if (access.local_url) {
-        const local = document.createElement('a');
-        local.href = access.local_url;
-        local.textContent = 'Use Home LAN';
-        actions.appendChild(local);
-      }
-      if (access.remote_url && access.remote_url !== access.local_url) {
-        const remote = document.createElement('a');
-        remote.href = access.remote_url;
-        remote.textContent = 'Use Tailscale';
-        actions.appendChild(remote);
-      }
-      if (actions.children.length) card.appendChild(actions);
-      const note = document.createElement('div');
-      note.className = 'safe-note';
-      note.textContent = 'Transparent LAN switching needs split-DNS/local HTTPS. These buttons let you choose the path without changing app data.';
-      card.appendChild(note);
-      grid.appendChild(card);
-    } catch (_) {}
-  }
-
-  async function run() {
-    await sleep(400);
-    await Promise.all([enhanceLocation(), enhanceTrips(), enhanceAccess()]);
-  }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', run, {once: true});
-  } else {
-    run();
-  }
-  setInterval(() => {
-    enhanceLocation();
-    enhanceTrips();
-  }, 65000);
-})();
-""".strip()
+    # Kept as a no-op compatibility asset for previously cached v1/v2 shells.
     return Response(
-        content=script,
+        content="/* Lexus Hub mobile enhancements are integrated into the current app shell. */",
         media_type="application/javascript",
         headers={"Cache-Control": "no-cache"},
     )
 
 
 class MobileEnhancementMiddleware(BaseHTTPMiddleware):
+    """Compatibility middleware for old cached shells; current v3 does not require it."""
+
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        if request.url.path != "/app" or "text/html" not in response.headers.get("content-type", ""):
+        if request.url.path != "/app" or "text/html" not in response.headers.get(
+            "content-type", ""
+        ):
             return response
         body = b""
         async for chunk in response.body_iterator:
