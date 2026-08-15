@@ -6,7 +6,6 @@ from .map_assets import MapAssetProxyMiddleware
 from .map_assets import router as map_assets_router
 from .mobile_app_v2 import GarageReturnLinkMiddleware
 from .mobile_app_v2 import router as mobile_app_v2_router
-from .mobile_enhancements import MobileEnhancementMiddleware
 from .mobile_enhancements import router as mobile_enhancements_router
 from .mobile_resilience import MobileResilienceMiddleware
 from .mobile_resilience import router as mobile_resilience_router
@@ -23,10 +22,11 @@ app.include_router(mobile_app_v2_router)
 app.include_router(pwa_router)
 app.include_router(resilience_router)
 app.include_router(map_assets_router)
+# These routers still provide trip-details, address, access, and refresh APIs used by mobile v2.
 app.include_router(mobile_enhancements_router)
 app.include_router(mobile_resilience_router)
-app.add_middleware(MobileEnhancementMiddleware)
 app.add_middleware(DashboardMapFallbackMiddleware)
 app.add_middleware(MapAssetProxyMiddleware)
+# This injects cached connection targets for the offline PWA shell without changing the v2 layout.
 app.add_middleware(MobileResilienceMiddleware)
 app.add_middleware(GarageReturnLinkMiddleware)
