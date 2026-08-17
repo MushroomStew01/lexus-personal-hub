@@ -41,9 +41,18 @@ def _distance_m(previous: Snapshot | None, current: Snapshot | None) -> float | 
 
 
 def _is_stationary(snapshot: Snapshot | None, settings: Settings) -> bool:
+    if snapshot is None:
+        return False
+    # Toyota's Speed field can remain at the last driving value after the car shuts down.
+    # Once the vehicle telemetry timestamp itself is old, do not let that stale speed keep
+    # a trip alive forever; the surrounding stop logic still requires two stable positions.
+    if snapshot.source_updated_at is not None:
+        age = snapshot.observed_at - snapshot.source_updated_at
+        stale_after = timedelta(minutes=max(30, settings.poll_interval_minutes * 3))
+        if age > stale_after:
+            return True
     return bool(
-        snapshot is not None
-        and snapshot.speed_kph is not None
+        snapshot.speed_kph is not None
         and snapshot.speed_kph <= settings.parking_speed_threshold_kph
     )
 
@@ -93,12 +102,7 @@ async def poll_once(
                     settings.min_trip_delta_km * 1000.0,
                 )
 
-                # Toyota can deliver the final odometer increment after the car is
-                # already parked. storage.py correctly applies that distance, but
-                # that late cloud update must not extend the driving duration.
-                confirmed_stationary = (
-                    current_stationary and previous_stationary and location_stable
-                )
+                confirmed_stationary = current_stationary and previous_stationary and location_stable
                 if (
                     confirmed_stationary
                     and previous_last_movement is not None
@@ -135,6 +139,9 @@ async def poll_once(
             "provider": provider.name,
             "vehicle": vehicle.display_name,
             "observed_at": snapshot.observed_at.isoformat(),
+            "source_updated_at": (
+                snapshot.source_updated_at.isoformat() if snapshot.source_updated_at else None
+            ),
             "odometer_km": snapshot.odometer_km,
             "fuel_percent": snapshot.fuel_percent,
             "range_km": snapshot.range_km,
@@ -168,9 +175,10 @@ async def _confirm_post_stop_status(settings: Settings) -> None:
         return
 
     _LOGGER.info(
-        "Post-stop status confirmation saved: refresh=%s snapshot=%s completed_trip=%s",
+        "Post-stop status confirmation saved: refresh=%s snapshot=%s source=%s completed_trip=%s",
         refresh_result.get("requested"),
         result.get("observed_at"),
+        result.get("source_updated_at"),
         result.get("completed_trip_id"),
     )
 
