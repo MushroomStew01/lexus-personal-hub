@@ -23,11 +23,13 @@ def _reading(
     speed_kph: float = 0.0,
     latitude: float | None = None,
     longitude: float | None = None,
+    source_updated_at=None,
 ) -> VehicleReading:
     return VehicleReading(
         provider_vehicle_id="mock:primary",
         display_name="Test Lexus",
         observed_at=at,
+        source_updated_at=source_updated_at,
         odometer_km=odometer_km,
         speed_kph=speed_kph,
         latitude=latitude,
@@ -106,6 +108,56 @@ def test_speed_can_start_trip_before_odometer_catches_up():
         assert trip is not None
         assert trip.is_open is True
         assert trip.distance_km == 0.0
+
+
+def test_repeated_stale_speed_revision_does_not_extend_trip():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    settings = Settings(
+        _env_file=None,
+        min_trip_delta_km=0.2,
+        trip_idle_close_minutes=10,
+    )
+    start = utcnow()
+    revision_1 = start
+    revision_2 = start + timedelta(minutes=5)
+
+    with Session(engine) as session:
+        save_snapshot(
+            session,
+            _reading(start, speed_kph=0, source_updated_at=revision_1),
+            "mock",
+            settings,
+        )
+        save_snapshot(
+            session,
+            _reading(
+                start + timedelta(minutes=5),
+                speed_kph=45,
+                source_updated_at=revision_2,
+            ),
+            "mock",
+            settings,
+        )
+        trip = session.scalar(select(Trip))
+        assert trip is not None
+        assert trip.last_movement_at == start + timedelta(minutes=5)
+
+        # Toyota/Home Assistant still exposes 45 km/h, but the Toyota Last Update
+        # timestamp has not advanced. This is the same cloud sample, not new motion.
+        save_snapshot(
+            session,
+            _reading(
+                start + timedelta(minutes=20),
+                speed_kph=45,
+                source_updated_at=revision_2,
+            ),
+            "mock",
+            settings,
+        )
+
+        assert trip.is_open is False
+        assert trip.ended_at == start + timedelta(minutes=5)
 
 
 def test_late_odometer_jump_reconciles_recent_gps_trip_instead_of_duplicate():
