@@ -58,6 +58,22 @@ def _gps_distance_m(previous: Snapshot | None, current: Snapshot | None) -> floa
     )
 
 
+def _telemetry_revision_advanced(previous: Snapshot | None, current: Snapshot) -> bool:
+    """Return whether Toyota reported a newer telemetry revision.
+
+    Home Assistant can be polled many times while Toyota's cloud payload is unchanged. In that case
+    the Speed entity can retain the last non-zero value from a drive. Treating every local poll as a
+    new speed sample keeps trips open and corrupts max-speed metrics. When both snapshots carry the
+    Toyota telemetry timestamp, speed only counts again after that timestamp advances.
+    """
+
+    if previous is None:
+        return True
+    if previous.source_updated_at is None or current.source_updated_at is None:
+        return True
+    return current.source_updated_at > previous.source_updated_at
+
+
 def _movement_signals(
     previous: Snapshot | None,
     current: Snapshot,
@@ -74,13 +90,16 @@ def _movement_signals(
     gps_distance_m = _gps_distance_m(previous, current)
     gps_threshold_m = max(100.0, settings.min_trip_delta_km * 1000.0)
     speed_threshold_kph = max(3.0, settings.parking_speed_threshold_kph + 1.0)
+    telemetry_advanced = _telemetry_revision_advanced(previous, current)
 
     odometer_moving = bool(
         odometer_delta_km is not None
         and odometer_delta_km >= settings.min_trip_delta_km
     )
     speed_moving = bool(
-        current.speed_kph is not None and current.speed_kph >= speed_threshold_kph
+        telemetry_advanced
+        and current.speed_kph is not None
+        and current.speed_kph >= speed_threshold_kph
     )
     gps_moving = bool(
         gps_distance_m is not None and gps_distance_m >= gps_threshold_m
@@ -91,6 +110,7 @@ def _movement_signals(
         "odometer_moving": odometer_moving,
         "speed_moving": speed_moving,
         "gps_moving": gps_moving,
+        "telemetry_revision_advanced": telemetry_advanced,
         "odometer_delta_km": odometer_delta_km,
         "gps_distance_m": gps_distance_m,
         "gps_threshold_m": gps_threshold_m,
@@ -166,11 +186,7 @@ def _reconcile_delayed_odometer(
         .order_by(Trip.ended_at.desc())
         .limit(1)
     )
-    if (
-        recent is None
-        or recent.end_latitude is None
-        or recent.end_longitude is None
-    ):
+    if recent is None or recent.end_latitude is None or recent.end_longitude is None:
         return False
 
     distance_from_trip_end_m = _haversine_m(
@@ -325,7 +341,7 @@ def trip_diagnostics(session: Session, settings: Settings) -> dict[str, object]:
         decision = (
             "Trip is open; movement signals keep it active until the configured idle timeout."
             if signals["moving"]
-            else "Trip is open but no movement signal is present; waiting for the idle timeout."
+            else "Trip is open but no new movement signal is present; waiting for the idle timeout."
         )
     elif signals["moving"]:
         decision = "Latest snapshot pair contains a movement signal and can start a trip."
@@ -350,6 +366,11 @@ def trip_diagnostics(session: Session, settings: Settings) -> dict[str, object]:
         "previous_snapshot": (
             {
                 "observed_at": previous.observed_at.isoformat(),
+                "source_updated_at": (
+                    previous.source_updated_at.isoformat()
+                    if previous.source_updated_at
+                    else None
+                ),
                 "odometer_km": previous.odometer_km,
                 "speed_kph": previous.speed_kph,
                 "has_location": _snapshot_has_location(previous),
@@ -362,6 +383,7 @@ def trip_diagnostics(session: Session, settings: Settings) -> dict[str, object]:
             "odometer_moving": signals["odometer_moving"],
             "speed_moving": signals["speed_moving"],
             "gps_moving": signals["gps_moving"],
+            "telemetry_revision_advanced": signals["telemetry_revision_advanced"],
             "odometer_delta_km": (
                 round(float(signals["odometer_delta_km"]), 3)
                 if signals["odometer_delta_km"] is not None
