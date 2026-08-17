@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 
 from lexus_hub.config import Settings
@@ -16,6 +18,35 @@ def test_distance_and_speed_unit_conversion():
     }
     assert provider._distance_km(distance) == pytest.approx(160.9344)
     assert provider._speed_kph(speed) == pytest.approx(16.09344)
+
+
+def test_toyota_last_update_timestamp_accepts_epoch_seconds_and_milliseconds():
+    provider = HAProvider(Settings(_env_file=None))
+    expected = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    seconds = expected.timestamp()
+    assert provider._parse_ha_timestamp(seconds) == expected
+    assert provider._parse_ha_timestamp(str(seconds)) == expected
+    assert provider._parse_ha_timestamp(seconds * 1000) == expected
+
+
+def test_toyota_last_update_entity_is_preferred():
+    settings = Settings(_env_file=None, vehicle_display_name="2023 IS")
+    provider = HAProvider(settings)
+    states = [
+        {
+            "entity_id": "sensor.2023_is_odometer",
+            "state": "50000",
+            "attributes": {"friendly_name": "2023 IS Odometer"},
+        },
+        {
+            "entity_id": "sensor.2023_is_last_update_timestamp",
+            "state": "1786968000",
+            "attributes": {"friendly_name": "2023 IS Last Update Timestamp"},
+        },
+    ]
+    found = provider._telemetry_timestamp_state(states)
+    assert found is not None
+    assert found["entity_id"] == "sensor.2023_is_last_update_timestamp"
 
 
 def test_entity_lookup_prefers_vehicle_display_name():
