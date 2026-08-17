@@ -56,7 +56,7 @@ _MOBILE_PATCH = r"""
   const renamePeak=()=>{
     qsa('.trip-stat-v2 span,.summary-stat span').forEach(el=>{
       const text=(el.textContent||'').trim().toLowerCase();
-      if(text==='sampled peak'||text==='peak estimate')el.textContent='Peak estimate';
+      if(text==='sampled peak'||text==='peak estimate'||text==='top speed')el.textContent='Top speed';
     });
   };
 
