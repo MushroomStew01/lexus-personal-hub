@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -111,12 +111,29 @@ class HAProvider:
 
     @staticmethod
     def _parse_ha_timestamp(value: object) -> datetime | None:
-        if not value:
+        if value is None or value == "":
             return None
-        text = str(value).strip().replace("Z", "+00:00")
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+        else:
+            text = str(value).strip()
+            try:
+                numeric = float(text)
+            except ValueError:
+                numeric = None
+            if numeric is None:
+                try:
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+                return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+        # Toyota NA exposes Last Update Timestamp as Unix seconds. Be tolerant of
+        # millisecond values so a future integration change does not break freshness.
+        if abs(numeric) > 10_000_000_000:
+            numeric /= 1000.0
         try:
-            return datetime.fromisoformat(text)
-        except ValueError:
+            return datetime.fromtimestamp(numeric, tz=UTC)
+        except (OverflowError, OSError, ValueError):
             return None
 
     @staticmethod
@@ -160,6 +177,15 @@ class HAProvider:
             if any(term in self._text(item) for term in terms)
         ]
         return candidates[0] if candidates else None
+
+    def _telemetry_timestamp_state(self, states: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if self.settings.ha_last_update_entity:
+            return self._find(states, self.settings.ha_last_update_entity, ())
+        return self._find(
+            states,
+            None,
+            ("last update timestamp", "last_update_timestamp"),
+        )
 
     def _location_state(self, states: list[dict[str, Any]]) -> dict[str, Any] | None:
         if self.settings.ha_location_entity:
@@ -266,7 +292,28 @@ class HAProvider:
         location = self._location_state(states)
         latitude, longitude = self._coordinates(location)
         status = self._status_map(states)
-        source_updated_at = self._parse_ha_timestamp(odometer.get("last_updated"))
+
+        telemetry_timestamp_state = self._telemetry_timestamp_state(states)
+        source_updated_at = self._parse_ha_timestamp(
+            telemetry_timestamp_state.get("state") if telemetry_timestamp_state else None
+        )
+        if source_updated_at is None:
+            source_updated_at = self._parse_ha_timestamp(odometer.get("last_updated"))
+
+        speed_kph = self._speed_kph(speed)
+        raw: dict[str, Any] = {
+            "status": status,
+            "telemetry": {
+                "source_updated_at": source_updated_at.isoformat() if source_updated_at else None,
+                "last_update_entity": (
+                    telemetry_timestamp_state.get("entity_id")
+                    if telemetry_timestamp_state
+                    else None
+                ),
+                "speed_entity": speed.get("entity_id") if speed else None,
+                "speed_ha_last_updated": speed.get("last_updated") if speed else None,
+            },
+        }
         return VehicleReading(
             provider_vehicle_id="ha:primary",
             display_name=self.settings.vehicle_display_name,
@@ -276,10 +323,10 @@ class HAProvider:
             odometer_km=self._distance_km(odometer),
             fuel_percent=self._number(fuel),
             range_km=self._distance_km(range_state),
-            speed_kph=self._speed_kph(speed),
+            speed_kph=speed_kph,
             latitude=latitude,
             longitude=longitude,
-            raw={"status": status},
+            raw=raw,
         )
 
     async def discover(self) -> dict[str, Any]:
@@ -317,10 +364,14 @@ class HAProvider:
                     }
                 )
         location = self._location_state(states)
+        telemetry_timestamp = self._telemetry_timestamp_state(states)
         return {
             "provider": self.name,
             "vehicle": self.settings.vehicle_display_name,
             "location_entity": location.get("entity_id") if location else None,
+            "last_update_entity": (
+                telemetry_timestamp.get("entity_id") if telemetry_timestamp else None
+            ),
             "candidates": candidates,
             "status": self._status_map(states),
         }
