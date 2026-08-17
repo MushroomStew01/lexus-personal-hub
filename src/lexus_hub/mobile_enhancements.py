@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from math import asin, cos, radians, sin, sqrt
 from urllib.parse import urlparse
@@ -99,9 +99,6 @@ def _estimated_address(
 ) -> str | None:
     if latitude is None or longitude is None or not settings.geoapify_api_key:
         return None
-    # Roughly 11 m precision. Accurate enough to identify the physical parking
-    # address without generating a new reverse-geocoding request for every tiny
-    # GPS jitter while the vehicle is stationary.
     return _reverse_geocode_geoapify(
         round(float(latitude), 4),
         round(float(longitude), 4),
@@ -122,6 +119,7 @@ def _haversine_km(a: Snapshot, b: Snapshot) -> float | None:
 
 
 def _segment_speed_estimates(snapshots: list[Snapshot]) -> list[float]:
+    """Diagnostic-only coarse segment speeds; never used as the displayed max speed."""
     estimates: list[float] = []
     for previous, current in zip(snapshots, snapshots[1:], strict=False):
         seconds = (current.observed_at - previous.observed_at).total_seconds()
@@ -138,11 +136,40 @@ def _segment_speed_estimates(snapshots: list[Snapshot]) -> list[float]:
         if distance_km is None or distance_km <= 0:
             continue
         estimate = distance_km / hours
-        # Reject impossible cloud/GPS jumps. The IS cannot legitimately produce
-        # a road-speed segment anywhere near this threshold.
         if 0 < estimate <= 250:
             estimates.append(estimate)
     return estimates
+
+
+def _fresh_speed_samples(snapshots: list[Snapshot], trip: Trip) -> list[float]:
+    """Return de-duplicated Toyota speed samples that belong to this trip.
+
+    Lexus Hub polls Home Assistant more often than Toyota necessarily uploads telemetry. Repeated
+    snapshots can therefore contain the same old speed value. A Toyota Last Update timestamp lets us
+    collapse those repeats and reject samples whose source timestamp is clearly outside the trip.
+    """
+
+    effective_end = trip.ended_at or trip.last_movement_at
+    window_start = trip.started_at - timedelta(minutes=10)
+    window_end = effective_end + timedelta(minutes=10)
+    seen_revisions: set[datetime] = set()
+    samples: list[float] = []
+
+    for row in snapshots:
+        if row.speed_kph is None:
+            continue
+        speed = float(row.speed_kph)
+        if not 0 <= speed <= 250:
+            continue
+        source = row.source_updated_at
+        if source is not None:
+            if source < window_start or source > window_end:
+                continue
+            if source in seen_revisions:
+                continue
+            seen_revisions.add(source)
+        samples.append(speed)
+    return samples
 
 
 def _trip_metrics(
@@ -154,20 +181,13 @@ def _trip_metrics(
     duration_seconds = max(0.0, (effective_end - trip.started_at).total_seconds())
     duration_minutes = round(duration_seconds / 60.0)
 
-    speeds = [
-        float(row.speed_kph)
-        for row in snapshots
-        if row.speed_kph is not None and 0 <= float(row.speed_kph) <= 250
-    ]
+    speeds = _fresh_speed_samples(snapshots, trip)
     sampled_peak = max(speeds) if speeds else None
     average_speed = (
         float(trip.distance_km) / (duration_seconds / 3600.0)
         if duration_seconds > 0 and trip.distance_km > 0
         else None
     )
-    segment_estimates = _segment_speed_estimates(snapshots)
-    peak_candidates = [value for value in [sampled_peak, average_speed, *segment_estimates] if value]
-    peak_estimate = max(peak_candidates) if peak_candidates else None
 
     fuels = [float(row.fuel_percent) for row in snapshots if row.fuel_percent is not None]
     fuel_start = fuels[0] if fuels else None
@@ -187,10 +207,8 @@ def _trip_metrics(
 
     return {
         "duration_minutes": duration_minutes,
-        # Keep the established field for the current UI, but it is now a robust
-        # lower-bound estimate using samples + odometer/GPS segment averages.
-        "top_speed_kph": round(peak_estimate, 1) if peak_estimate is not None else None,
-        "peak_speed_estimate_kph": round(peak_estimate, 1) if peak_estimate is not None else None,
+        "top_speed_kph": round(sampled_peak, 1) if sampled_peak is not None else None,
+        "peak_speed_estimate_kph": round(sampled_peak, 1) if sampled_peak is not None else None,
         "sampled_top_speed_kph": round(sampled_peak, 1) if sampled_peak is not None else None,
         "average_speed_kph": round(average_speed, 1) if average_speed is not None else None,
         "fuel_start_percent": fuel_start,
@@ -202,9 +220,11 @@ def _trip_metrics(
         "start_odometer_km": round(float(trip.start_odometer_km), 1),
         "end_odometer_km": round(float(trip.end_odometer_km), 1),
         "telemetry_samples": len(snapshots),
+        "speed_samples": len(speeds),
         "speed_note": (
-            "Peak speed is estimated from saved speed samples and telemetry-segment averages; "
-            "a brief peak between vehicle updates can still be missed."
+            "Top speed is the highest fresh Toyota speed sample saved during this trip. "
+            "Brief peaks between Toyota telemetry updates can be missed; odometer/GPS segment "
+            "averages are intentionally not used as a fake maximum."
         ),
     }
 
@@ -241,8 +261,6 @@ def api_trip_details(trip_id: int) -> dict[str, object]:
         end_latitude = trip.end_latitude
         end_longitude = trip.end_longitude
 
-    # Saved Home/Work aliases are intentionally not used for the mobile app.
-    # Every trip is described by its physical reverse-geocoded location.
     start_address = _estimated_address(settings, start_latitude, start_longitude)
     end_address = _estimated_address(settings, end_latitude, end_longitude)
     return {
@@ -389,7 +407,6 @@ def api_access(request: Request) -> dict[str, object]:
 
 @router.get("/mobile-enhancements.js", include_in_schema=False)
 def mobile_enhancements_js() -> Response:
-    # Kept as a no-op compatibility asset for previously cached v1/v2 shells.
     return Response(
         content="/* Lexus Hub mobile enhancements are integrated into the current app shell. */",
         media_type="application/javascript",
