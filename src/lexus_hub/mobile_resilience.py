@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from urllib.parse import urlparse
 
 from fastapi import APIRouter
@@ -11,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .config import get_settings
 from .ha_refresh import discover_refresh_options, request_vehicle_refresh
 from .poller import poll_once
+from .providers import get_provider
 
 router = APIRouter(tags=["mobile resilience"])
 
@@ -22,11 +24,32 @@ def _host(url: str | None) -> str | None:
     return parsed.hostname
 
 
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+async def _provider_source_timestamp() -> datetime | None:
+    settings = get_settings()
+    provider = get_provider(settings)
+    reading = await provider.fetch()
+    return reading.source_updated_at
+
+
 @router.get("/api/vehicle/refresh-capability")
 async def api_vehicle_refresh_capability() -> dict[str, object]:
     settings = get_settings()
     try:
-        return await discover_refresh_options(settings)
+        result = await discover_refresh_options(settings)
+        result["off_vehicle_refresh"] = bool(
+            result.get("selected_service") == "toyota_na.refresh"
+            and result.get("configured_device_id")
+        )
+        result["off_vehicle_note"] = (
+            "toyota_na.refresh is a telemetry wake/status-refresh request. It can be requested "
+            "while the car is off; success still depends on Toyota Connected Services and the "
+            "vehicle cellular modem responding. It does not start the engine."
+        )
+        return result
     except Exception as exc:
         return {
             "supported": False,
@@ -37,6 +60,13 @@ async def api_vehicle_refresh_capability() -> dict[str, object]:
 @router.post("/api/vehicle/refresh")
 async def api_vehicle_refresh() -> dict[str, object]:
     settings = get_settings()
+    before_source: datetime | None = None
+    try:
+        before_source = await _provider_source_timestamp()
+    except Exception:
+        # The actual refresh request can still succeed even if the pre-flight read fails.
+        pass
+
     refresh_result: dict[str, object]
     try:
         refresh_result = await request_vehicle_refresh(settings)
@@ -46,16 +76,70 @@ async def api_vehicle_refresh() -> dict[str, object]:
             "reason": f"Vehicle wake/refresh request failed: {exc}",
         }
 
-    if refresh_result.get("requested") and settings.ha_refresh_settle_seconds:
-        await asyncio.sleep(settings.ha_refresh_settle_seconds)
+    # The Toyota NA Home Assistant service already waits for its own coordinator refresh.
+    # After it returns, probe Home Assistant a few times without issuing another wake command.
+    # This verifies whether the parked/off vehicle actually uploaded a newer telemetry revision.
+    after_source: datetime | None = None
+    fresh_data_received = False
+    verification_attempts = 0
+    if refresh_result.get("requested"):
+        wait_budget = max(0, settings.ha_refresh_settle_seconds)
+        delays = [0, 3, 5, 7, 10]
+        elapsed = 0
+        for delay in delays:
+            if delay:
+                if elapsed + delay > wait_budget:
+                    break
+                await asyncio.sleep(delay)
+                elapsed += delay
+            verification_attempts += 1
+            try:
+                after_source = await _provider_source_timestamp()
+            except Exception:
+                continue
+            if after_source is not None and (
+                before_source is None or after_source > before_source
+            ):
+                fresh_data_received = True
+                break
 
     poll_result = await poll_once(settings)
+    poll_source_text = poll_result.get("source_updated_at")
+    if isinstance(poll_source_text, str):
+        try:
+            poll_source = datetime.fromisoformat(poll_source_text)
+        except ValueError:
+            poll_source = None
+        if poll_source is not None:
+            after_source = poll_source
+            if before_source is None or poll_source > before_source:
+                fresh_data_received = True
+
+    if not refresh_result.get("requested"):
+        refresh_state = "request_failed"
+    elif fresh_data_received:
+        refresh_state = "fresh_vehicle_data_received"
+    else:
+        refresh_state = "refresh_requested_no_new_vehicle_timestamp"
+
     return {
         "refresh": refresh_result,
+        "verification": {
+            "state": refresh_state,
+            "fresh_data_received": fresh_data_received,
+            "before_source_updated_at": _iso(before_source),
+            "after_source_updated_at": _iso(after_source),
+            "attempts": verification_attempts,
+            "vehicle_may_be_asleep": bool(
+                refresh_result.get("requested") and not fresh_data_received
+            ),
+        },
         "poll": poll_result,
         "note": (
-            "This action only requests fresh telemetry and saves a new snapshot. "
-            "It does not start, lock, unlock, or change climate settings."
+            "This action asks Toyota Connected Services to wake/refresh vehicle telemetry and "
+            "then verifies whether the Toyota telemetry timestamp advanced. The request can be "
+            "made while the car is off, but a deeply sleeping or unreachable vehicle may not "
+            "return newer data. It does not start, lock, unlock, or change climate settings."
         ),
     }
 
@@ -122,12 +206,13 @@ window.LEXUS_CONNECTIONS = {access_json};
     button.id = 'vehicle-refresh-button';
     button.addEventListener('click', async () => {{
       button.disabled = true;
-      button.textContent = 'Refreshing…';
+      button.textContent = 'Waking Lexus…';
       try {{
         const response = await fetch('/api/vehicle/refresh', {{method: 'POST', cache: 'no-store'}});
         if (!response.ok) throw new Error(await response.text());
-        button.textContent = 'Updated';
-        setTimeout(() => window.location.reload(), 700);
+        const result = await response.json();
+        button.textContent = result.verification?.fresh_data_received ? 'Fresh data ✓' : 'Refresh requested';
+        setTimeout(() => window.location.reload(), 900);
       }} catch (_) {{
         button.textContent = 'Refresh failed';
         button.disabled = false;
