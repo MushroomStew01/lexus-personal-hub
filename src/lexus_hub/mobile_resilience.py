@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+import logging
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from fastapi import APIRouter
@@ -15,6 +16,7 @@ from .poller import poll_once
 from .providers import get_provider
 
 router = APIRouter(tags=["mobile resilience"])
+_LOGGER = logging.getLogger(__name__)
 
 
 def _host(url: str | None) -> str | None:
@@ -24,15 +26,31 @@ def _host(url: str | None) -> str | None:
     return parsed.hostname
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Normalize provider/database timestamps before freshness comparisons.
+
+    Home Assistant/Toyota timestamps are timezone-aware while SQLite snapshots are stored as
+    UTC-naive datetimes. Comparing the two directly raises TypeError, so the refresh endpoint
+    normalizes both representations to timezone-aware UTC first.
+    """
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
+    normalized = _as_utc(value)
+    return normalized.isoformat() if normalized is not None else None
 
 
 async def _provider_source_timestamp() -> datetime | None:
     settings = get_settings()
     provider = get_provider(settings)
     reading = await provider.fetch()
-    return reading.source_updated_at
+    return _as_utc(reading.source_updated_at)
 
 
 @router.get("/api/vehicle/refresh-capability")
@@ -94,25 +112,35 @@ async def api_vehicle_refresh() -> dict[str, object]:
                 elapsed += delay
             verification_attempts += 1
             try:
-                after_source = await _provider_source_timestamp()
+                after_source = _as_utc(await _provider_source_timestamp())
             except Exception:
                 continue
             if after_source is not None and (
-                before_source is None or after_source > before_source
+                before_source is None or after_source > _as_utc(before_source)
             ):
                 fresh_data_received = True
                 break
 
-    poll_result = await poll_once(settings)
+    poll_result: dict[str, object]
+    try:
+        poll_result = await poll_once(settings)
+    except Exception as exc:
+        _LOGGER.exception("Follow-up poll after vehicle refresh failed")
+        poll_result = {
+            "ok": False,
+            "error": "Follow-up poll failed after the Toyota refresh request.",
+            "error_type": type(exc).__name__,
+        }
+
     poll_source_text = poll_result.get("source_updated_at")
     if isinstance(poll_source_text, str):
         try:
-            poll_source = datetime.fromisoformat(poll_source_text)
+            poll_source = _as_utc(datetime.fromisoformat(poll_source_text))
         except ValueError:
             poll_source = None
         if poll_source is not None:
             after_source = poll_source
-            if before_source is None or poll_source > before_source:
+            if before_source is None or poll_source > _as_utc(before_source):
                 fresh_data_received = True
 
     if not refresh_result.get("requested"):
